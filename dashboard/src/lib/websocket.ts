@@ -14,8 +14,11 @@ export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
 
   const connect = useCallback(() => {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+    const envWsUrl = process.env.NEXT_PUBLIC_WS_URL;
+    const defaultProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const defaultWsUrl = `${defaultProtocol}//${window.location.host}/ws`;
+    const wsUrl = envWsUrl?.trim() ? envWsUrl : defaultWsUrl;
+    const ws = new WebSocket(wsUrl);
 
     ws.onopen = () => setConnected(true);
     ws.onclose = () => {

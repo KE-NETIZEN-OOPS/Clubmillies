@@ -1,4 +1,5 @@
 .env
+dashboard/.env*
 *.db
 *.log
 __pycache__/

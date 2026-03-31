@@ -1,0 +1,11 @@
+{
+  "name": "clubmillies",
+  "private": true,
+  "scripts": {
+    "dev": "cd dashboard && npm run dev",
+    "build": "cd dashboard && npm run build",
+    "start": "cd dashboard && npm run start",
+    "vercel-build": "cd dashboard && npm run build"
+  }
+}
+

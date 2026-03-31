@@ -1,0 +1,8 @@
+{
+  "version": 2,
+  "installCommand": "cd dashboard && npm install",
+  "buildCommand": "cd dashboard && npm run build",
+  "devCommand": "cd dashboard && npm run dev",
+  "framework": "nextjs"
+}
+
