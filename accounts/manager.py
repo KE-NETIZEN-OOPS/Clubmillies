@@ -164,7 +164,22 @@ class MT5LiveBroker:
             order_type = self.mt5.ORDER_TYPE_SELL
             price = tick.bid
 
-        request = {
+        # Prefer symbol-specific filling mode (most reliable).
+        sym_fill = getattr(sym_info, "filling_mode", None) if sym_info else None
+        # For XAUUSD.s on JustMarkets, order_check passes only with FOK (0).
+        # So we try FOK first, then fall back to symbol/defaults.
+        preferred_fillings = [
+            getattr(self.mt5, "ORDER_FILLING_FOK", None),
+        ]
+        if sym_fill is not None:
+            preferred_fillings.append(sym_fill)
+        preferred_fillings += [
+            getattr(self.mt5, "ORDER_FILLING_RETURN", None),
+            getattr(self.mt5, "ORDER_FILLING_IOC", None),
+        ]
+        preferred_fillings = [f for f in preferred_fillings if f is not None]
+
+        base_request = {
             "action": self.mt5.TRADE_ACTION_DEAL,
             "symbol": self.symbol,
             "volume": lots,
@@ -176,11 +191,18 @@ class MT5LiveBroker:
             "magic": 123456,
             "comment": "ClubMillies",
             "type_time": self.mt5.ORDER_TIME_GTC,
-            "type_filling": self.mt5.ORDER_FILLING_IOC,
         }
-        result = self.mt5.order_send(request)
-        if result and result.retcode == self.mt5.TRADE_RETCODE_DONE:
-            return {"ticket": result.order, "price": price}
+
+        last_result = None
+        for filling in preferred_fillings:
+            req = {**base_request, "type_filling": filling}
+            result = self.mt5.order_send(req)
+            last_result = result
+            if result and result.retcode == self.mt5.TRADE_RETCODE_DONE:
+                return {"ticket": result.order, "price": price}
+
+        if last_result and getattr(last_result, "comment", ""):
+            logger.error(f"MT5 order_send failed: {last_result.comment}")
         return None
 
     def close_position(self, ticket):
@@ -193,8 +215,10 @@ class MT5LiveBroker:
         tick = self.mt5.symbol_info_tick(pos.symbol)
         close_type = self.mt5.ORDER_TYPE_SELL if pos.type == 0 else self.mt5.ORDER_TYPE_BUY
         price = tick.bid if pos.type == 0 else tick.ask
+        sym_info = self.mt5.symbol_info(pos.symbol)
+        sym_fill = getattr(sym_info, "filling_mode", None) if sym_info else None
 
-        request = {
+        base_request = {
             "action": self.mt5.TRADE_ACTION_DEAL,
             "symbol": pos.symbol,
             "volume": pos.volume,
@@ -205,9 +229,22 @@ class MT5LiveBroker:
             "magic": 123456,
             "comment": "ClubMillies close",
             "type_time": self.mt5.ORDER_TIME_GTC,
-            "type_filling": self.mt5.ORDER_FILLING_IOC,
         }
-        self.mt5.order_send(request)
+        preferred_fillings = [
+            getattr(self.mt5, "ORDER_FILLING_FOK", None),
+        ]
+        if sym_fill is not None:
+            preferred_fillings.append(sym_fill)
+        preferred_fillings += [
+            getattr(self.mt5, "ORDER_FILLING_RETURN", None),
+            getattr(self.mt5, "ORDER_FILLING_IOC", None),
+        ]
+        preferred_fillings = [f for f in preferred_fillings if f is not None]
+        for filling in preferred_fillings:
+            req = {**base_request, "type_filling": filling}
+            res = self.mt5.order_send(req)
+            if res and res.retcode == self.mt5.TRADE_RETCODE_DONE:
+                return
 
 
 class AccountRunner:
@@ -407,7 +444,8 @@ class AccountRunner:
         # Save signal
         await self._save_signal(signal, score, result.get("max_score", 15), reasons, price, last.get("rsi"), atr, sig_sl, sig_tp)
 
-        if signal != 0 and len(self.broker.positions) < 3:
+        max_open = getattr(account, "max_open_trades", 3) or 3
+        if signal != 0 and len(self.broker.positions) < max_open:
             # Close opposite
             if self.broker_type == "mt5":
                 # For MT5, close opposite positions via the terminal (no PnL simulation).

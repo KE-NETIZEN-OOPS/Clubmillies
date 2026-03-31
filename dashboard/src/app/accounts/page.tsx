@@ -12,7 +12,7 @@ export default function AccountsPage() {
   const [showModal, setShowModal] = useState(false);
   const [form, setForm] = useState({
     name: '', broker_type: 'paper', profile: 'SNIPER',
-    symbol: 'XAUUSDm', balance: 10000, risk_per_trade: 0.02,
+    symbol: 'XAUUSD.s', balance: 10000, risk_per_trade: 0.02,
     login: '', password: '', server: '',
   });
 

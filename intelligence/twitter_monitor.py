@@ -48,6 +48,7 @@ class TwitterMonitor:
         self.accounts = accounts or DEFAULT_ACCOUNTS
         self.last_tweet_ids: dict[str, str] = {}
         self.use_api = bool(self.bearer_token)
+        self._api_blocked = False
         self._working_bridge: str | None = None
         self._seen_tweets: set[str] = set()
 
@@ -59,12 +60,18 @@ class TwitterMonitor:
                 f"{TWITTER_API_BASE}/users/by/username/{username}",
                 headers={"Authorization": f"Bearer {self.bearer_token}"},
             )
+            if resp.status_code == 402:
+                self._api_blocked = True
+                logger.warning("Twitter API returned 402 (plan restriction) — falling back to scraping mode")
+                return None
             if resp.status_code == 200:
                 return resp.json()["data"]["id"]
         return None
 
     async def _api_fetch_tweets(self, username: str) -> list[dict]:
         try:
+            if self._api_blocked:
+                return []
             user_id = await self._api_get_user_id(username)
             if not user_id:
                 return []
@@ -85,6 +92,9 @@ class TwitterMonitor:
                 )
 
             if resp.status_code != 200:
+                if resp.status_code == 402:
+                    self._api_blocked = True
+                    logger.warning("Twitter API returned 402 (plan restriction) — falling back to scraping mode")
                 return []
 
             data = resp.json()
@@ -225,8 +235,10 @@ class TwitterMonitor:
 
     async def fetch_user_tweets(self, username: str) -> list[dict]:
         """Fetch tweets using the best available method."""
-        if self.use_api:
-            return await self._api_fetch_tweets(username)
+        if self.use_api and not self._api_blocked:
+            tweets = await self._api_fetch_tweets(username)
+            if tweets:
+                return tweets
 
         # Try RSS first, then syndication
         tweets = await self._scrape_rss(username)

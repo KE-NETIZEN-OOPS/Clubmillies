@@ -11,7 +11,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPExcept
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from sqlalchemy import select, func, update, desc
+from sqlalchemy import select, func, update, desc, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
@@ -208,7 +208,16 @@ async def create_account(data: AccountCreate):
         session.add(account)
         await session.commit()
         await session.refresh(account)
-        return {"id": account.id, "name": account.name, "status": "created"}
+
+    # If the trading engine is running, start this account immediately.
+    mgr = getattr(app.state, "account_manager", None)
+    if mgr and getattr(account, "enabled", False):
+        try:
+            await mgr.start_account(account.id)
+        except Exception as e:
+            logger.error(f"Failed to start account runner {account.id}: {e}")
+
+    return {"id": account.id, "name": account.name, "status": "created"}
 
 
 @app.patch("/api/accounts/{account_id}")
@@ -233,8 +242,23 @@ async def delete_account(account_id: int):
         account = result.scalar_one_or_none()
         if not account:
             raise HTTPException(404, "Account not found")
-        await session.delete(account)
+
+        # Stop runner if trading engine is running
+        mgr = getattr(app.state, "account_manager", None)
+        if mgr:
+            try:
+                await mgr.stop_account(account_id)
+            except Exception as e:
+                logger.error(f"Failed to stop runner for account {account_id}: {e}")
+
+        # Clean up dependent rows (SQLite FK constraints are strict).
+        # Commit the deletes before removing the account to avoid SQLAlchemy trying
+        # to NULL out FK columns on flush.
+        await session.execute(delete(Trade).where(Trade.account_id == account_id))
+        await session.execute(delete(Signal).where(Signal.account_id == account_id))
+        await session.execute(delete(Account).where(Account.id == account_id))
         await session.commit()
+
         return {"id": account_id, "status": "deleted"}
 
 
@@ -247,7 +271,18 @@ async def toggle_account(account_id: int):
             raise HTTPException(404, "Account not found")
         account.enabled = not account.enabled
         await session.commit()
-        return {"id": account_id, "enabled": account.enabled}
+
+    mgr = getattr(app.state, "account_manager", None)
+    if mgr:
+        try:
+            if account.enabled:
+                await mgr.start_account(account_id)
+            else:
+                await mgr.stop_account(account_id)
+        except Exception as e:
+            logger.error(f"Failed to toggle runner for account {account_id}: {e}")
+
+    return {"id": account_id, "enabled": account.enabled}
 
 
 # ── Trades ───────────────────────────────────────────────────────────

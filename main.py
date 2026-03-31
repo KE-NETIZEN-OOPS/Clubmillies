@@ -107,6 +107,8 @@ async def start_services():
     manager = AccountManager()
     await manager.start_all()
     logger.info("Trading engine started")
+    # Expose manager to API routes (create/toggle can start/stop runners)
+    app.state.account_manager = manager
 
     # Start Telegram bot
     try:
