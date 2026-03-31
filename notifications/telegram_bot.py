@@ -47,9 +47,9 @@ async def on_trade_closed(event):
     await _broadcast(trade_closed_msg(event.data))
 
 async def on_signal(event):
-    # Only send BUY/SELL signals (not HOLD), minimum score 3
+    # Only send BUY/SELL signals that meet trading threshold (5+)
     signal = event.data.get("signal")
-    if signal in ("BUY", "SELL") and event.data.get("score", 0) >= 3:
+    if signal in ("BUY", "SELL") and event.data.get("score", 0) >= 5:
         await _broadcast(signal_msg(event.data))
 
 async def on_news(event):

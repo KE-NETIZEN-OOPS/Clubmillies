@@ -79,12 +79,141 @@ class PaperBroker:
         return self.price_history[-1]["close"]
 
 
+class MT5LiveBroker:
+    """Real MT5 broker for live/demo trading."""
+
+    TIMEFRAME_MAP = {}
+
+    def __init__(self, symbol: str, timeframe: str):
+        self.symbol = symbol
+        self.timeframe = timeframe
+        self.balance = 0.0
+        self.positions = []
+
+        try:
+            import MetaTrader5 as mt5
+            self.mt5 = mt5
+            self.TIMEFRAME_MAP = {
+                "M1": mt5.TIMEFRAME_M1, "M5": mt5.TIMEFRAME_M5,
+                "M15": mt5.TIMEFRAME_M15, "M30": mt5.TIMEFRAME_M30,
+                "H1": mt5.TIMEFRAME_H1, "H4": mt5.TIMEFRAME_H4,
+                "D1": mt5.TIMEFRAME_D1,
+            }
+            info = mt5.account_info()
+            if info:
+                self.balance = info.balance
+        except ImportError:
+            self.mt5 = None
+
+    def tick(self):
+        """Update balance and positions from MT5."""
+        if not self.mt5:
+            return
+        info = self.mt5.account_info()
+        if info:
+            self.balance = info.balance
+        # Sync open positions
+        pos = self.mt5.positions_get(symbol=self.symbol)
+        self.positions = []
+        if pos:
+            for p in pos:
+                self.positions.append({
+                    "ticket": p.ticket,
+                    "direction": "BUY" if p.type == 0 else "SELL",
+                    "entry": p.price_open,
+                    "lots": p.volume,
+                    "sl": p.sl,
+                    "tp": p.tp,
+                    "profit": p.profit,
+                })
+
+    def get_candles(self, count=150):
+        if not self.mt5:
+            return pd.DataFrame()
+        tf = self.TIMEFRAME_MAP.get(self.timeframe, 15)
+        rates = self.mt5.copy_rates_from_pos(self.symbol, tf, 0, count)
+        if rates is None or len(rates) == 0:
+            return pd.DataFrame()
+        df = pd.DataFrame(rates)
+        df["time"] = pd.to_datetime(df["time"], unit="s")
+        df.rename(columns={"tick_volume": "volume"}, inplace=True)
+        return df[["time", "open", "high", "low", "close", "volume"]]
+
+    def get_price(self):
+        if not self.mt5:
+            return 0
+        tick = self.mt5.symbol_info_tick(self.symbol)
+        return tick.bid if tick else 0
+
+    def place_order(self, direction, lots, sl, tp):
+        if not self.mt5:
+            return None
+        tick = self.mt5.symbol_info_tick(self.symbol)
+        if not tick:
+            return None
+        sym_info = self.mt5.symbol_info(self.symbol)
+        digits = sym_info.digits if sym_info else 2
+
+        if direction == "BUY":
+            order_type = self.mt5.ORDER_TYPE_BUY
+            price = tick.ask
+        else:
+            order_type = self.mt5.ORDER_TYPE_SELL
+            price = tick.bid
+
+        request = {
+            "action": self.mt5.TRADE_ACTION_DEAL,
+            "symbol": self.symbol,
+            "volume": lots,
+            "type": order_type,
+            "price": price,
+            "sl": round(sl, digits),
+            "tp": round(tp, digits),
+            "deviation": 20,
+            "magic": 123456,
+            "comment": "ClubMillies",
+            "type_time": self.mt5.ORDER_TIME_GTC,
+            "type_filling": self.mt5.ORDER_FILLING_IOC,
+        }
+        result = self.mt5.order_send(request)
+        if result and result.retcode == self.mt5.TRADE_RETCODE_DONE:
+            return {"ticket": result.order, "price": price}
+        return None
+
+    def close_position(self, ticket):
+        if not self.mt5:
+            return
+        positions = self.mt5.positions_get(ticket=ticket)
+        if not positions:
+            return
+        pos = positions[0]
+        tick = self.mt5.symbol_info_tick(pos.symbol)
+        close_type = self.mt5.ORDER_TYPE_SELL if pos.type == 0 else self.mt5.ORDER_TYPE_BUY
+        price = tick.bid if pos.type == 0 else tick.ask
+
+        request = {
+            "action": self.mt5.TRADE_ACTION_DEAL,
+            "symbol": pos.symbol,
+            "volume": pos.volume,
+            "type": close_type,
+            "position": ticket,
+            "price": price,
+            "deviation": 20,
+            "magic": 123456,
+            "comment": "ClubMillies close",
+            "type_time": self.mt5.ORDER_TIME_GTC,
+            "type_filling": self.mt5.ORDER_FILLING_IOC,
+        }
+        self.mt5.order_send(request)
+
+
 class AccountRunner:
     """Runs the trading strategy for a single account."""
 
     def __init__(self, account_id: int):
         self.account_id = account_id
-        self.broker: Optional[PaperBroker] = None
+        self.broker = None
+        self.broker_type = "paper"
         self.engine: Optional[ConfluenceEngine] = None
         self.running = False
         self._task: Optional[asyncio.Task] = None
@@ -101,8 +230,21 @@ class AccountRunner:
             logger.error(f"Account {self.account_id} not found")
             return
 
-        # Setup broker
-        self.broker = PaperBroker(balance=account.balance)
+        # Setup broker based on account type
+        self.broker_type = account.broker_type
+        if account.broker_type == "mt5":
+            try:
+                self.broker = await self._connect_mt5(account)
+                if not self.broker:
+                    logger.error(f"MT5 connection failed for {account.name} — falling back to paper")
+                    self.broker = PaperBroker(balance=account.balance or 10000)
+                    self.broker_type = "paper"
+            except Exception as e:
+                logger.error(f"MT5 error: {e} — falling back to paper")
+                self.broker = PaperBroker(balance=account.balance or 10000)
+                self.broker_type = "paper"
+        else:
+            self.broker = PaperBroker(balance=account.balance)
 
         # Setup confluence engine
         profile = settings.sniper if account.profile == "SNIPER" else settings.aggressive
@@ -111,10 +253,12 @@ class AccountRunner:
         self.tp_mult = profile["atr_tp"]
         self.risk_pct = account.risk_per_trade
 
-        logger.info(f"Account {account.name} (#{account.id}) started — {account.profile} mode")
+        broker_label = "MT5 LIVE" if self.broker_type == "mt5" else "PAPER"
+        logger.info(f"Account {account.name} (#{account.id}) started — {account.profile} mode [{broker_label}]")
         await bus.emit(ACCOUNT_UPDATE, {
             "account_id": account.id, "name": account.name,
-            "status": "running", "balance": account.balance
+            "status": "running", "balance": self.broker.balance,
+            "broker": broker_label,
         })
 
         while self.running:
@@ -126,6 +270,44 @@ class AccountRunner:
             except Exception as e:
                 logger.error(f"Account {self.account_id} error: {e}", exc_info=True)
                 await asyncio.sleep(30)
+
+    async def _connect_mt5(self, account):
+        """Connect to MetaTrader 5 — only works on Windows."""
+        try:
+            import MetaTrader5 as mt5
+        except ImportError:
+            logger.warning("MetaTrader5 package not installed — pip install MetaTrader5 (Windows only)")
+            return None
+
+        success = await asyncio.to_thread(mt5.initialize)
+        if not success:
+            logger.error(f"MT5 init failed: {mt5.last_error()}")
+            return None
+
+        authorized = await asyncio.to_thread(
+            mt5.login,
+            login=int(account.login),
+            password=account.password,
+            server=account.server,
+        )
+        if not authorized:
+            logger.error(f"MT5 login failed: {mt5.last_error()}")
+            await asyncio.to_thread(mt5.shutdown)
+            return None
+
+        info = await asyncio.to_thread(mt5.account_info)
+        logger.info(f"MT5 connected: {info.server} | Account: {info.login} | Balance: ${info.balance:.2f}")
+
+        # Update balance in DB
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                update(Account).where(Account.id == account.id).values(
+                    balance=info.balance, equity=info.equity
+                )
+            )
+            await session.commit()
+
+        return MT5LiveBroker(account.symbol or "XAUUSDm", account.timeframe or "M15")
 
     async def stop(self):
         self.running = False
@@ -235,11 +417,27 @@ class AccountRunner:
                 else:
                     sl, tp = round(price + sl_dist, 2), round(price - tp_dist, 2)
 
-                pos = {"direction": direction, "entry": price, "lots": lots,
-                       "sl": sl, "tp": tp, "score": score, "reasons": reasons}
-                self.broker.positions.append(pos)
+                # For MT5: place real order via broker
+                if self.broker_type == "mt5" and hasattr(self.broker, 'place_order'):
+                    order_result = await asyncio.to_thread(
+                        self.broker.place_order, direction, lots, sl, tp
+                    )
+                    if order_result:
+                        price = order_result.get("price", price)
+                        logger.info(f"MT5 order placed: {direction} {lots} lots @ ${price:.2f}")
+                    else:
+                        logger.error("MT5 order failed — skipping")
+                        return
+                else:
+                    # Paper broker: just append to positions list
+                    pos = {"direction": direction, "entry": price, "lots": lots,
+                           "sl": sl, "tp": tp, "score": score, "reasons": reasons}
+                    self.broker.positions.append(pos)
 
-                await self._save_open_trade(pos, score, reasons)
+                await self._save_open_trade(
+                    {"direction": direction, "entry": price, "lots": lots, "sl": sl, "tp": tp},
+                    score, reasons
+                )
                 await bus.emit(TRADE_OPENED, {
                     "account_id": self.account_id, "direction": direction,
                     "price": price, "lots": lots, "sl": sl, "tp": tp,

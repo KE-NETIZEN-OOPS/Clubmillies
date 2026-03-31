@@ -53,12 +53,13 @@ BANNER = r"""
 """
 
 
-async def create_default_account():
-    """Create a default paper trading account if none exist."""
+async def create_default_accounts():
+    """Create default accounts if none exist."""
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(Account))
         if not result.scalars().first():
-            account = Account(
+            # Paper demo account
+            session.add(Account(
                 name="Paper Demo",
                 broker_type="paper",
                 symbol="XAUUSDm",
@@ -66,10 +67,23 @@ async def create_default_account():
                 balance=10000.0,
                 equity=10000.0,
                 enabled=True,
-            )
-            session.add(account)
+            ))
+            # JustMarkets MT5 demo account
+            session.add(Account(
+                name="JustMarkets Demo",
+                broker_type="mt5",
+                login="2001943232",
+                password="Kenya254@_",
+                server="JustMarkets-Demo",
+                symbol="XAUUSDm",
+                timeframe="M15",
+                profile="SNIPER",
+                balance=0.0,
+                equity=0.0,
+                enabled=True,
+            ))
             await session.commit()
-            logger.info("Created default paper trading account")
+            logger.info("Created default accounts (Paper + JustMarkets MT5)")
 
 
 async def start_services():
@@ -78,7 +92,7 @@ async def start_services():
 
     # Initialize database
     await init_db()
-    await create_default_account()
+    await create_default_accounts()
     logger.info("Database initialized")
 
     # Start account manager (trading engine)
