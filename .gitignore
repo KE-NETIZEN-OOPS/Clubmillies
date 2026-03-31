@@ -1,0 +1,13 @@
+.env
+*.db
+*.log
+__pycache__/
+*.pyc
+node_modules/
+.next/
+dashboard/.next/
+*.egg-info/
+dist/
+build/
+.DS_Store
+nohup.out
