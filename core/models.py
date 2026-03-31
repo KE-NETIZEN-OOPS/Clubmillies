@@ -108,3 +108,15 @@ class TelegramChat(Base):
     username = Column(String(100), nullable=True)
     subscribed = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class Tweet(Base):
+    __tablename__ = "tweets"
+
+    id = Column(Integer, primary_key=True)
+    tweet_id = Column(String(100), unique=True, index=True)
+    author = Column(String(100))
+    text = Column(Text)
+    url = Column(String(300), nullable=True)
+    created_at = Column(DateTime, nullable=True)
+    fetched_at = Column(DateTime, default=datetime.utcnow)

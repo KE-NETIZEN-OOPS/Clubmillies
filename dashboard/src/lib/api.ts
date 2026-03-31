@@ -20,6 +20,7 @@ export const api = {
   signals: (params?: string) => fetchApi<SignalData[]>(`/api/signals${params ? '?' + params : ''}`),
   news: () => fetchApi<NewsData[]>('/api/news'),
   analyses: () => fetchApi<AnalysisData[]>('/api/ai-analyses'),
+  tweets: () => fetchApi<TweetData[]>('/api/tweets'),
   stats: () => fetchApi<StatsData>('/api/stats'),
 };
 
@@ -104,6 +105,16 @@ export interface AnalysisData {
   confidence: number;
   reasoning: string;
   created_at: string;
+}
+
+export interface TweetData {
+  id: number;
+  tweet_id: string;
+  author: string;
+  text: string;
+  url?: string | null;
+  created_at: string | null;
+  fetched_at: string | null;
 }
 
 export interface StatsData {

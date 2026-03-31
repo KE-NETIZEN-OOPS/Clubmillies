@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
 from core.database import AsyncSessionLocal, get_session, init_db
-from core.models import Account, Trade, Signal, NewsEvent, AIAnalysis
+from core.models import Account, Trade, Signal, NewsEvent, AIAnalysis, Tweet
 from core.events import bus
 
 logger = logging.getLogger("clubmillies.api")
@@ -337,6 +337,28 @@ async def list_analyses(limit: int = 20):
             "created_at": a.created_at.isoformat() if a.created_at else None,
         }
         for a in analyses
+    ]
+
+
+@app.get("/api/tweets")
+async def list_tweets(limit: int = 30):
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Tweet).order_by(desc(Tweet.created_at)).limit(limit)
+        )
+        tweets = result.scalars().all()
+
+    return [
+        {
+            "id": t.id,
+            "tweet_id": t.tweet_id,
+            "author": t.author,
+            "text": t.text,
+            "url": t.url,
+            "created_at": t.created_at.isoformat() if t.created_at else None,
+            "fetched_at": t.fetched_at.isoformat() if t.fetched_at else None,
+        }
+        for t in tweets
     ]
 
 

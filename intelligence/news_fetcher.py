@@ -31,8 +31,17 @@ async def fetch_forexfactory_calendar() -> list[dict]:
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
             resp = await client.get(FOREX_FACTORY_URL, headers=headers)
             if resp.status_code != 200:
-                logger.warning(f"Forexfactory returned {resp.status_code}")
-                return events
+                # Forexfactory often blocks server-like traffic. Try a read-proxy fallback.
+                logger.warning(f"Forexfactory returned {resp.status_code} — trying fallback fetch")
+                fallback_url = f"https://r.jina.ai/http://{FOREX_FACTORY_URL}"
+                resp = await client.get(fallback_url, headers=headers)
+                if resp.status_code != 200:
+                    logger.warning(f"Forexfactory fallback returned {resp.status_code}")
+                    return events
+
+        # The fallback fetch returns a markdown rendering, not HTML.
+        if "Markdown Content:" in resp.text:
+            return _parse_forexfactory_markdown(resp.text)
 
         soup = BeautifulSoup(resp.text, "html.parser")
         rows = soup.select("tr.calendar__row")
@@ -94,6 +103,85 @@ async def fetch_forexfactory_calendar() -> list[dict]:
 
     except Exception as e:
         logger.error(f"Forexfactory scrape error: {e}")
+
+    return events
+
+
+def _parse_forexfactory_markdown(text: str) -> list[dict]:
+    """Parse the Jina markdown proxy output into event dicts."""
+    events: list[dict] = []
+    current_date: datetime.date | None = None
+    now_date = datetime.utcnow().date()
+
+    # Extract only the table section
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip().startswith("|")]
+    if not lines:
+        return events
+
+    # Skip header rows (first two lines are table header + separator)
+    for ln in lines[2:]:
+        # Split markdown row into cells
+        parts = [p.strip() for p in ln.strip("|").split("|")]
+        if len(parts) < 10:
+            continue
+
+        # Heuristic: Date column sometimes contains "Mon Mar 30"
+        date_cell = parts[0]
+        time_cell = parts[1] if len(parts) > 1 else ""
+        currency = parts[2] if len(parts) > 2 else ""
+        impact_cell = parts[3] if len(parts) > 3 else ""
+        title = parts[4] if len(parts) > 4 else "Unknown"
+        actual = parts[7] if len(parts) > 7 else ""
+        forecast = parts[8] if len(parts) > 8 else ""
+        previous = parts[9] if len(parts) > 9 else ""
+
+        # Update current_date if present
+        # Examples: "Mon Mar 30", "Sun Mar 29"
+        if date_cell and any(m in date_cell for m in ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")) and "All Day" not in date_cell:
+            try:
+                # date_cell may include markdown link, keep plain tokens
+                tokens = date_cell.replace("[", "").replace("]", "").split()
+                if len(tokens) >= 3:
+                    # Assume current year if not provided
+                    dt = datetime.strptime(f"{tokens[1]} {tokens[2]} {datetime.utcnow().year}", "%b %d %Y")
+                    current_date = dt.date()
+            except Exception:
+                current_date = current_date or now_date
+        if current_date is None:
+            current_date = now_date
+
+        if not currency or currency not in GOLD_CURRENCIES:
+            continue
+
+        impact = "low"
+        impact_lower = impact_cell.lower()
+        if "impact-red" in impact_lower or "ff-impact-red" in impact_lower:
+            impact = "high"
+        elif "impact-ora" in impact_lower or "ff-impact-ora" in impact_lower:
+            impact = "medium"
+        elif "impact-yel" in impact_lower or "ff-impact-yel" in impact_lower:
+            impact = "low"
+
+        # Parse time (may be "All Day" or "7:50pm")
+        event_time = datetime.combine(current_date, datetime.utcnow().time())
+        if time_cell and ":" in time_cell:
+            try:
+                t = datetime.strptime(time_cell.replace("am", " AM").replace("pm", " PM"), "%I:%M %p")
+                event_time = datetime.combine(current_date, t.time())
+            except Exception:
+                pass
+        elif time_cell.lower() == "all day":
+            event_time = datetime.combine(current_date, datetime.min.time())
+
+        events.append({
+            "title": title,
+            "currency": currency,
+            "impact": impact,
+            "forecast": forecast,
+            "previous": previous,
+            "actual": actual,
+            "event_time": event_time,
+        })
 
     return events
 

@@ -88,6 +88,7 @@ class MT5LiveBroker:
         self.symbol = symbol
         self.timeframe = timeframe
         self.balance = 0.0
+        self.equity = 0.0
         self.positions = []
 
         try:
@@ -112,6 +113,7 @@ class MT5LiveBroker:
         info = self.mt5.account_info()
         if info:
             self.balance = info.balance
+            self.equity = info.equity
         # Sync open positions
         pos = self.mt5.positions_get(symbol=self.symbol)
         self.positions = []
@@ -130,7 +132,8 @@ class MT5LiveBroker:
     def get_candles(self, count=150):
         if not self.mt5:
             return pd.DataFrame()
-        tf = self.TIMEFRAME_MAP.get(self.timeframe, 15)
+        # TIMEFRAME constants are MetaTrader5 enums (not raw minutes).
+        tf = self.TIMEFRAME_MAP.get(self.timeframe, self.mt5.TIMEFRAME_M15)
         rates = self.mt5.copy_rates_from_pos(self.symbol, tf, 0, count)
         if rates is None or len(rates) == 0:
             return pd.DataFrame()
@@ -236,13 +239,13 @@ class AccountRunner:
             try:
                 self.broker = await self._connect_mt5(account)
                 if not self.broker:
-                    logger.error(f"MT5 connection failed for {account.name} — falling back to paper")
-                    self.broker = PaperBroker(balance=account.balance or 10000)
-                    self.broker_type = "paper"
+                    logger.error(f"MT5 connection failed for {account.name} — disabling account")
+                    await self._disable_account(account.id, reason="MT5 connection failed")
+                    return
             except Exception as e:
-                logger.error(f"MT5 error: {e} — falling back to paper")
-                self.broker = PaperBroker(balance=account.balance or 10000)
-                self.broker_type = "paper"
+                logger.error(f"MT5 error: {e} — disabling account")
+                await self._disable_account(account.id, reason=f"MT5 error: {e}")
+                return
         else:
             self.broker = PaperBroker(balance=account.balance)
 
@@ -309,6 +312,18 @@ class AccountRunner:
 
         return MT5LiveBroker(account.symbol or "XAUUSDm", account.timeframe or "M15")
 
+    async def _disable_account(self, account_id: int, reason: str):
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                update(Account).where(Account.id == account_id).values(enabled=False)
+            )
+            await session.commit()
+        await bus.emit(ACCOUNT_UPDATE, {
+            "account_id": account_id,
+            "status": "disabled",
+            "reason": reason,
+        })
+
     async def stop(self):
         self.running = False
         if self._task:
@@ -317,6 +332,12 @@ class AccountRunner:
     async def _tick(self, account: Account):
         self.broker.tick()
         df = self.broker.get_candles()
+        if df is None or getattr(df, "empty", True) or "close" not in df.columns:
+            logger.warning(
+                f"Account {self.account_id}: no candle data for {getattr(self.broker, 'symbol', '')} "
+                f"({getattr(self.broker, 'timeframe', '')})"
+            )
+            return
 
         df = prepare_dataframe(
             df, settings.ema_fast, settings.ema_slow,
@@ -332,46 +353,46 @@ class AccountRunner:
         score = result["score"]
         reasons = result["reasons"]
 
-        # Check SL/TP on open positions
         contract_size = 100
-        closed_trades = []
-        remaining = []
-        for pos in self.broker.positions:
-            hit = False
-            if pos["direction"] == "BUY":
-                if price <= pos["sl"]:
-                    pnl = (pos["sl"] - pos["entry"]) * pos["lots"] * contract_size
-                    self.broker.balance += pnl
-                    closed_trades.append({**pos, "exit": pos["sl"], "pnl": round(pnl, 2), "reason": "STOP LOSS"})
-                    hit = True
-                elif price >= pos["tp"]:
-                    pnl = (pos["tp"] - pos["entry"]) * pos["lots"] * contract_size
-                    self.broker.balance += pnl
-                    closed_trades.append({**pos, "exit": pos["tp"], "pnl": round(pnl, 2), "reason": "TAKE PROFIT"})
-                    hit = True
-            else:
-                if price >= pos["sl"]:
-                    pnl = (pos["entry"] - pos["sl"]) * pos["lots"] * contract_size
-                    self.broker.balance += pnl
-                    closed_trades.append({**pos, "exit": pos["sl"], "pnl": round(pnl, 2), "reason": "STOP LOSS"})
-                    hit = True
-                elif price <= pos["tp"]:
-                    pnl = (pos["entry"] - pos["tp"]) * pos["lots"] * contract_size
-                    self.broker.balance += pnl
-                    closed_trades.append({**pos, "exit": pos["tp"], "pnl": round(pnl, 2), "reason": "TAKE PROFIT"})
-                    hit = True
-            if not hit:
-                remaining.append(pos)
-        self.broker.positions = remaining
+        if self.broker_type != "mt5":
+            # Paper-mode SL/TP simulation
+            closed_trades = []
+            remaining = []
+            for pos in self.broker.positions:
+                hit = False
+                if pos["direction"] == "BUY":
+                    if price <= pos["sl"]:
+                        pnl = (pos["sl"] - pos["entry"]) * pos["lots"] * contract_size
+                        self.broker.balance += pnl
+                        closed_trades.append({**pos, "exit": pos["sl"], "pnl": round(pnl, 2), "reason": "STOP LOSS"})
+                        hit = True
+                    elif price >= pos["tp"]:
+                        pnl = (pos["tp"] - pos["entry"]) * pos["lots"] * contract_size
+                        self.broker.balance += pnl
+                        closed_trades.append({**pos, "exit": pos["tp"], "pnl": round(pnl, 2), "reason": "TAKE PROFIT"})
+                        hit = True
+                else:
+                    if price >= pos["sl"]:
+                        pnl = (pos["entry"] - pos["sl"]) * pos["lots"] * contract_size
+                        self.broker.balance += pnl
+                        closed_trades.append({**pos, "exit": pos["sl"], "pnl": round(pnl, 2), "reason": "STOP LOSS"})
+                        hit = True
+                    elif price <= pos["tp"]:
+                        pnl = (pos["entry"] - pos["tp"]) * pos["lots"] * contract_size
+                        self.broker.balance += pnl
+                        closed_trades.append({**pos, "exit": pos["tp"], "pnl": round(pnl, 2), "reason": "TAKE PROFIT"})
+                        hit = True
+                if not hit:
+                    remaining.append(pos)
+            self.broker.positions = remaining
 
-        # Emit closed trade events and save to DB
-        for ct in closed_trades:
-            await self._save_closed_trade(ct)
-            await bus.emit(TRADE_CLOSED, {
-                "account_id": self.account_id, "direction": ct["direction"],
-                "entry": ct["entry"], "exit": ct["exit"], "pnl": ct["pnl"],
-                "reason": ct["reason"], "lots": ct["lots"],
-            })
+            for ct in closed_trades:
+                await self._save_closed_trade(ct)
+                await bus.emit(TRADE_CLOSED, {
+                    "account_id": self.account_id, "direction": ct["direction"],
+                    "entry": ct["entry"], "exit": ct["exit"], "pnl": ct["pnl"],
+                    "reason": ct["reason"], "lots": ct["lots"],
+                })
 
         # Calculate SL/TP for the signal (even if we don't trade)
         sig_sl, sig_tp = None, None
@@ -388,21 +409,45 @@ class AccountRunner:
 
         if signal != 0 and len(self.broker.positions) < 3:
             # Close opposite
-            still_open = []
-            for pos in self.broker.positions:
-                if (signal == 1 and pos["direction"] == "SELL") or (signal == -1 and pos["direction"] == "BUY"):
-                    pnl_dir = 1 if pos["direction"] == "BUY" else -1
-                    pnl = (price - pos["entry"]) * pnl_dir * pos["lots"] * contract_size
-                    self.broker.balance += pnl
-                    await self._save_closed_trade({**pos, "exit": price, "pnl": round(pnl, 2), "reason": "REVERSAL"})
-                    await bus.emit(TRADE_CLOSED, {
-                        "account_id": self.account_id, "direction": pos["direction"],
-                        "entry": pos["entry"], "exit": price, "pnl": round(pnl, 2),
-                        "reason": "REVERSAL", "lots": pos["lots"],
-                    })
-                else:
-                    still_open.append(pos)
-            self.broker.positions = still_open
+            if self.broker_type == "mt5":
+                # For MT5, close opposite positions via the terminal (no PnL simulation).
+                for pos in list(self.broker.positions):
+                    if (signal == 1 and pos["direction"] == "SELL") or (signal == -1 and pos["direction"] == "BUY"):
+                        ticket = pos.get("ticket")
+                        if ticket:
+                            await asyncio.to_thread(self.broker.close_position, ticket)
+                            await self._save_closed_trade({
+                                "direction": pos["direction"],
+                                "entry": pos["entry"],
+                                "lots": pos["lots"],
+                                "exit": price,
+                                "pnl": round(float(pos.get("profit", 0.0) or 0.0), 2),
+                                "reason": "REVERSAL",
+                            })
+                            await bus.emit(TRADE_CLOSED, {
+                                "account_id": self.account_id, "direction": pos["direction"],
+                                "entry": pos["entry"], "exit": price,
+                                "pnl": round(float(pos.get("profit", 0.0) or 0.0), 2),
+                                "reason": "REVERSAL", "lots": pos["lots"],
+                            })
+                # Refresh positions after closes
+                self.broker.tick()
+            else:
+                still_open = []
+                for pos in self.broker.positions:
+                    if (signal == 1 and pos["direction"] == "SELL") or (signal == -1 and pos["direction"] == "BUY"):
+                        pnl_dir = 1 if pos["direction"] == "BUY" else -1
+                        pnl = (price - pos["entry"]) * pnl_dir * pos["lots"] * contract_size
+                        self.broker.balance += pnl
+                        await self._save_closed_trade({**pos, "exit": price, "pnl": round(pnl, 2), "reason": "REVERSAL"})
+                        await bus.emit(TRADE_CLOSED, {
+                            "account_id": self.account_id, "direction": pos["direction"],
+                            "entry": pos["entry"], "exit": price, "pnl": round(pnl, 2),
+                            "reason": "REVERSAL", "lots": pos["lots"],
+                        })
+                    else:
+                        still_open.append(pos)
+                self.broker.positions = still_open
 
             # Open new position
             if pd.notna(atr) and atr > 0:
@@ -444,17 +489,24 @@ class AccountRunner:
                     "score": score, "reasons": reasons,
                 })
 
-        # Update account balance in DB
+        # Update account balance/equity in DB
         async with AsyncSessionLocal() as session:
-            await session.execute(
-                update(Account).where(Account.id == self.account_id).values(
-                    balance=round(self.broker.balance, 2),
-                    equity=round(self.broker.balance + sum(
-                        ((price - p["entry"]) if p["direction"] == "BUY" else (p["entry"] - price))
-                        * p["lots"] * contract_size for p in self.broker.positions
-                    ), 2)
+            if self.broker_type == "mt5":
+                bal = round(float(getattr(self.broker, "balance", 0.0) or 0.0), 2)
+                eq = round(float(getattr(self.broker, "equity", bal) or bal), 2)
+                await session.execute(
+                    update(Account).where(Account.id == self.account_id).values(balance=bal, equity=eq)
                 )
-            )
+            else:
+                await session.execute(
+                    update(Account).where(Account.id == self.account_id).values(
+                        balance=round(self.broker.balance, 2),
+                        equity=round(self.broker.balance + sum(
+                            ((price - p["entry"]) if p["direction"] == "BUY" else (p["entry"] - price))
+                            * p["lots"] * contract_size for p in self.broker.positions
+                        ), 2)
+                    )
+                )
             await session.commit()
 
     async def _save_open_trade(self, pos, score, reasons):

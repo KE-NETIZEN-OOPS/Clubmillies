@@ -9,6 +9,7 @@ import sys
 import signal
 import uvicorn
 from pathlib import Path
+import os
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -58,32 +59,39 @@ async def create_default_accounts():
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(Account))
         if not result.scalars().first():
-            # Paper demo account
-            session.add(Account(
-                name="Paper Demo",
-                broker_type="paper",
-                symbol="XAUUSDm",
-                profile="SNIPER",
-                balance=10000.0,
-                equity=10000.0,
-                enabled=True,
-            ))
-            # JustMarkets MT5 demo account
-            session.add(Account(
-                name="JustMarkets Demo",
-                broker_type="mt5",
-                login="2001943232",
-                password="Kenya254@_",
-                server="JustMarkets-Demo",
-                symbol="XAUUSDm",
-                timeframe="M15",
-                profile="SNIPER",
-                balance=0.0,
-                equity=0.0,
-                enabled=True,
-            ))
+            # Defaults are optional and must come from environment variables.
+            # Never hardcode real credentials in source control.
+            create_paper = (os.getenv("CREATE_PAPER_DEMO", "false").lower() == "true")
+            if create_paper:
+                session.add(Account(
+                    name="Paper Demo",
+                    broker_type="paper",
+                    symbol=os.getenv("DEFAULT_SYMBOL", "XAUUSDm"),
+                    profile=os.getenv("DEFAULT_PROFILE", "SNIPER"),
+                    balance=float(os.getenv("PAPER_BALANCE", "10000")),
+                    equity=float(os.getenv("PAPER_BALANCE", "10000")),
+                    enabled=True,
+                ))
+
+            mt5_login = os.getenv("MT5_LOGIN", "").strip()
+            mt5_password = os.getenv("MT5_PASSWORD", "").strip()
+            mt5_server = os.getenv("MT5_SERVER", "").strip()
+            if mt5_login and mt5_password and mt5_server:
+                session.add(Account(
+                    name=os.getenv("MT5_ACCOUNT_NAME", "MT5 Account"),
+                    broker_type="mt5",
+                    login=mt5_login,
+                    password=mt5_password,
+                    server=mt5_server,
+                    symbol=os.getenv("MT5_SYMBOL", os.getenv("DEFAULT_SYMBOL", "XAUUSDm")),
+                    timeframe=os.getenv("MT5_TIMEFRAME", "M15"),
+                    profile=os.getenv("DEFAULT_PROFILE", "SNIPER"),
+                    balance=0.0,
+                    equity=0.0,
+                    enabled=True,
+                ))
             await session.commit()
-            logger.info("Created default accounts (Paper + JustMarkets MT5)")
+            logger.info("Created default accounts from environment variables")
 
 
 async def start_services():
@@ -117,6 +125,28 @@ async def start_services():
     except Exception as e:
         logger.warning(f"News monitor failed: {e}")
 
+    # Start AI analyzer (Claude) for news/tweets/market if configured
+    try:
+        from intelligence.claude_analyzer import ClaudeAnalyzer
+        from core.events import NEWS_EVENT, bus
+
+        analyzer = ClaudeAnalyzer()
+
+        async def _on_news_for_ai(event):
+            try:
+                # event.data comes from bus.emit(NEWS_EVENT, ev)
+                await analyzer.analyze_news(event.data)
+            except Exception as e:
+                logger.warning(f"AI news analysis failed: {e}")
+
+        if analyzer.enabled:
+            bus.subscribe(NEWS_EVENT, _on_news_for_ai)
+            logger.info("AI analyzer enabled")
+        else:
+            logger.info("AI analyzer disabled (no ANTHROPIC_API_KEY)")
+    except Exception as e:
+        logger.warning(f"AI analyzer failed to start: {e}")
+
     # Start Twitter monitor
     try:
         from intelligence.twitter_monitor import TwitterMonitor
@@ -124,6 +154,26 @@ async def start_services():
         asyncio.create_task(twitter.monitor_loop())
     except Exception as e:
         logger.warning(f"Twitter monitor failed: {e}")
+
+    # AI analyze tweet batches (if AI is enabled)
+    try:
+        from core.events import bus
+        from intelligence.claude_analyzer import ClaudeAnalyzer
+
+        analyzer = ClaudeAnalyzer()
+
+        async def _on_tweets_for_ai(event):
+            try:
+                tweets = (event.data or {}).get("tweets") or []
+                if tweets:
+                    await analyzer.analyze_tweets(tweets)
+            except Exception as e:
+                logger.warning(f"AI tweet analysis failed: {e}")
+
+        if analyzer.enabled:
+            bus.subscribe("twitter.tweets", _on_tweets_for_ai)
+    except Exception as e:
+        logger.warning(f"AI tweet hook failed: {e}")
 
     # Start API server
     config = uvicorn.Config(

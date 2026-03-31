@@ -14,6 +14,9 @@ from bs4 import BeautifulSoup
 
 from core.config import settings
 from core.events import bus
+from core.database import AsyncSessionLocal
+from core.models import Tweet
+from sqlalchemy import select
 
 logger = logging.getLogger("clubmillies.twitter")
 
@@ -258,8 +261,11 @@ class TwitterMonitor:
                 tweets = await self.fetch_all_accounts()
                 if tweets:
                     logger.info(f"Fetched {len(tweets)} tweets from {len(self.accounts)} accounts")
+                    await self._save_tweets(tweets)
                     for tweet in tweets:
                         await bus.emit("twitter.tweet", tweet)
+                    # Emit a batch event for downstream consumers (AI, dashboard, etc.)
+                    await bus.emit("twitter.tweets", {"tweets": tweets})
 
                     # Keep seen tweets cache manageable
                     if len(self._seen_tweets) > 5000:
@@ -268,3 +274,39 @@ class TwitterMonitor:
                 logger.error(f"Twitter monitor error: {e}")
 
             await asyncio.sleep(300)  # 5 minutes
+
+    async def _save_tweets(self, tweets: list[dict]):
+        async with AsyncSessionLocal() as session:
+            for t in tweets:
+                tweet_id = str(t.get("id", "")).strip()
+                if not tweet_id:
+                    continue
+
+                existing = await session.execute(
+                    select(Tweet).where(Tweet.tweet_id == tweet_id)
+                )
+                if existing.scalar_one_or_none():
+                    continue
+
+                created_at = None
+                try:
+                    ca = t.get("created_at")
+                    if ca:
+                        created_at = datetime.fromisoformat(ca.replace("Z", "+00:00"))
+                except Exception:
+                    created_at = None
+
+                url = t.get("url")
+                if not url:
+                    author = t.get("author", "")
+                    url = f"https://x.com/{author}/status/{tweet_id}" if author and tweet_id.isdigit() else None
+
+                session.add(Tweet(
+                    tweet_id=tweet_id,
+                    author=t.get("author", ""),
+                    text=t.get("text", ""),
+                    url=url,
+                    created_at=created_at,
+                ))
+
+            await session.commit()

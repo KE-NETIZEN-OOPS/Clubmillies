@@ -2,6 +2,7 @@
 ClubMillies — Telegram Bot for trade alerts and management.
 """
 import logging
+import os
 from datetime import datetime
 from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -236,10 +237,24 @@ async def setup_telegram():
         BotCommand("help", "Show commands"),
     ])
 
+    # Default: outbound-only (no polling) to avoid getUpdates conflicts.
+    # Enable polling only when explicitly requested via TELEGRAM_ENABLE_POLLING=true.
+    enable_polling = (os.getenv("TELEGRAM_ENABLE_POLLING", "false").lower() == "true")
+    chat_id = (settings.telegram_chat_id or "").strip()
+    if chat_id:
+        async with AsyncSessionLocal() as session:
+            existing = await session.execute(select(TelegramChat).where(TelegramChat.chat_id == chat_id))
+            if not existing.scalar_one_or_none():
+                session.add(TelegramChat(chat_id=chat_id, username="env", subscribed=True))
+                await session.commit()
+
     await app.initialize()
     await app.start()
-    await app.updater.start_polling(drop_pending_updates=True)
-    logger.info("Telegram bot started")
+    if enable_polling:
+        await app.updater.start_polling(drop_pending_updates=True)
+        logger.info("Telegram bot started (polling enabled)")
+    else:
+        logger.info("Telegram bot started (outbound-only; polling disabled)")
 
 
 async def stop_telegram():

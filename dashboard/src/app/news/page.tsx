@@ -3,22 +3,24 @@
 import { useEffect, useState } from 'react';
 import GlowCard from '@/components/ui/GlowCard';
 import NeonBadge from '@/components/ui/NeonBadge';
-import { api, NewsData, AnalysisData } from '@/lib/api';
+import { api, NewsData, AnalysisData, TweetData } from '@/lib/api';
 
 export default function NewsPage() {
   const [news, setNews] = useState<NewsData[]>([]);
   const [analyses, setAnalyses] = useState<AnalysisData[]>([]);
+  const [tweets, setTweets] = useState<TweetData[]>([]);
 
   useEffect(() => {
     api.news().then(setNews).catch(console.error);
     api.analyses().then(setAnalyses).catch(console.error);
+    api.tweets().then(setTweets).catch(console.error);
   }, []);
 
   return (
     <div className="space-y-8">
       <h1 className="text-2xl font-bold">News & AI Analysis</h1>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* AI Analyses */}
         <div>
           <h2 className="text-lg font-bold text-gray-300 mb-4">AI Analysis (Claude)</h2>
@@ -91,6 +93,35 @@ export default function NewsPage() {
                     </div>
                   );
                 })}
+              </div>
+            )}
+          </GlowCard>
+        </div>
+
+        {/* Tweets */}
+        <div>
+          <h2 className="text-lg font-bold text-gray-300 mb-4">Tweets (Market Intel)</h2>
+          <GlowCard>
+            {tweets.length === 0 ? (
+              <p className="text-gray-600 text-center py-4">No tweets loaded</p>
+            ) : (
+              <div className="space-y-3">
+                {tweets.map((t) => (
+                  <div key={t.id} className="p-3 rounded-lg bg-white/5 border border-white/5">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-xs text-gray-500">@{t.author}</span>
+                      {t.url ? (
+                        <a className="text-xs text-neon-cyan hover:underline" href={t.url} target="_blank" rel="noreferrer">
+                          open
+                        </a>
+                      ) : null}
+                    </div>
+                    <p className="text-sm text-gray-400 whitespace-pre-wrap">{t.text}</p>
+                    <p className="text-[10px] text-gray-600 mt-2">
+                      {t.created_at ? new Date(t.created_at).toLocaleString() : (t.fetched_at ? new Date(t.fetched_at).toLocaleString() : '')}
+                    </p>
+                  </div>
+                ))}
               </div>
             )}
           </GlowCard>
