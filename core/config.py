@@ -18,6 +18,12 @@ class Settings:
     # Telegram
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    # Stats commands: exclude paper bots; narrow to MT5 and/or live (see .env.example)
+    telegram_exclude_paper: bool = True
+    telegram_mt5_only: bool = False
+    telegram_mt5_live_only: bool = False
+    # Comma-separated account ids — if set, only these (enabled) rows are used for /status /report /trades
+    telegram_stats_account_ids: str = ""
 
     # Anthropic
     anthropic_api_key: str = ""
@@ -94,6 +100,13 @@ class Settings:
             dashboard_public_url=os.getenv(
                 "DASHBOARD_PUBLIC_URL", "https://clubmillies.vercel.app"
             ).rstrip("/"),
+            telegram_exclude_paper=os.getenv("TELEGRAM_EXCLUDE_PAPER", "true").lower()
+            in ("1", "true", "yes"),
+            telegram_mt5_only=os.getenv("TELEGRAM_MT5_ONLY", "false").lower()
+            in ("1", "true", "yes"),
+            telegram_mt5_live_only=os.getenv("TELEGRAM_MT5_LIVE_ONLY", "false").lower()
+            in ("1", "true", "yes"),
+            telegram_stats_account_ids=os.getenv("TELEGRAM_STATS_ACCOUNT_IDS", "").strip(),
         )
 
 
