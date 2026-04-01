@@ -73,6 +73,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ query: query?.trim() || null }),
     }),
+  intelSummary: (limit?: number) =>
+    fetchApi<IntelSummaryData>(
+      `/api/intel/summary${limit != null ? `?limit=${encodeURIComponent(String(limit))}` : ''}`
+    ),
 };
 
 // Types
@@ -258,6 +262,21 @@ export interface IntelFetchResult {
     confidence: number;
     reasoning: string;
   };
+}
+
+export interface IntelSummaryData {
+  counts: { bullish: number; bearish: number; neutral: number; unknown: number };
+  total_posts: number;
+  tagged_posts: number;
+  net_bias: string;
+  net_summary_line: string;
+  batch_analysis: {
+    direction: string;
+    confidence: number;
+    reasoning: string;
+    created_at: string | null;
+  } | null;
+  tweets: TweetData[];
 }
 
 export interface LiveSnapshot {

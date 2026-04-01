@@ -7,4 +7,14 @@ test.describe('News & AI page', () => {
     await expect(page.getByRole('heading', { name: /AI Analysis \(Claude\)/i })).toBeVisible();
     await expect(page.getByRole('heading', { name: /Economic Calendar/i })).toBeVisible();
   });
+
+  test('Market intel column fits viewport (no horizontal scroll in main)', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto('/news');
+    const main = page.locator('main');
+    await expect(page.getByRole('heading', { name: /Market intel/i })).toBeVisible();
+    const scrollW = await main.evaluate((el) => el.scrollWidth);
+    const clientW = await main.evaluate((el) => el.clientWidth);
+    expect(scrollW, 'main should not overflow horizontally').toBeLessThanOrEqual(clientW + 2);
+  });
 });

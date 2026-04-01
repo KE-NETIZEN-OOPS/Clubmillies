@@ -647,6 +647,92 @@ async def intel_fetch_tweets(body: IntelFetchBody):
     }
 
 
+@app.get("/api/intel/summary")
+async def intel_summary(limit: int = Query(200, le=500, description="Max posts to load for counts + list")):
+    """
+    Aggregate intel: per-direction counts, net bias line, latest batch Claude summary, and tweet rows.
+    """
+    async with AsyncSessionLocal() as session:
+        tr = await session.execute(
+            select(Tweet).order_by(desc(Tweet.fetched_at)).limit(limit)
+        )
+        tweets = list(tr.scalars().all())
+        ar = await session.execute(
+            select(AIAnalysis)
+            .where(AIAnalysis.source == "twitter")
+            .order_by(desc(AIAnalysis.created_at))
+            .limit(1)
+        )
+        batch = ar.scalar_one_or_none()
+
+    counts = {"bullish": 0, "bearish": 0, "neutral": 0, "unknown": 0}
+    for t in tweets:
+        d = (getattr(t, "ai_direction", None) or "").strip().lower()
+        if d == "bullish":
+            counts["bullish"] += 1
+        elif d == "bearish":
+            counts["bearish"] += 1
+        elif d == "neutral":
+            counts["neutral"] += 1
+        else:
+            counts["unknown"] += 1
+
+    tagged = counts["bullish"] + counts["bearish"] + counts["neutral"]
+    if tagged == 0:
+        net_bias = "unknown"
+        net_summary_line = (
+            "No posts have per-post AI tags yet. Run Fetch intel on the Market intel page "
+            "with ANTHROPIC_API_KEY set on the API server."
+        )
+    else:
+        b, br, n = counts["bullish"], counts["bearish"], counts["neutral"]
+        if b > br and b > n:
+            net_bias = "bullish"
+        elif br > b and br > n:
+            net_bias = "bearish"
+        elif n >= b and n >= br:
+            net_bias = "neutral"
+        else:
+            net_bias = "mixed"
+        net_summary_line = (
+            f"In this list, {b} post(s) lean bullish, {br} bearish, {n} neutral "
+            f"(among {tagged} with tags). Net: {net_bias}."
+        )
+
+    batch_payload = None
+    if batch:
+        batch_payload = {
+            "direction": batch.direction,
+            "confidence": batch.confidence,
+            "reasoning": batch.reasoning,
+            "created_at": batch.created_at.isoformat() if batch.created_at else None,
+        }
+
+    return {
+        "counts": counts,
+        "total_posts": len(tweets),
+        "tagged_posts": tagged,
+        "net_bias": net_bias,
+        "net_summary_line": net_summary_line,
+        "batch_analysis": batch_payload,
+        "tweets": [
+            {
+                "id": t.id,
+                "tweet_id": t.tweet_id,
+                "author": t.author,
+                "text": t.text,
+                "url": t.url,
+                "created_at": t.created_at.isoformat() if t.created_at else None,
+                "fetched_at": t.fetched_at.isoformat() if t.fetched_at else None,
+                "ai_direction": getattr(t, "ai_direction", None),
+                "ai_confidence": getattr(t, "ai_confidence", None),
+                "ai_reasoning": getattr(t, "ai_reasoning", None),
+            }
+            for t in tweets
+        ],
+    }
+
+
 # ── Live snapshot (open trades + spot) ───────────────────────────────
 
 @app.get("/api/live")

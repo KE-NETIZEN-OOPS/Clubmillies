@@ -1,13 +1,11 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import Link from 'next/link';
 import GlowCard from '@/components/ui/GlowCard';
 import NeonBadge from '@/components/ui/NeonBadge';
-import { api, NewsData, AnalysisData, TweetData } from '@/lib/api';
-import { motion } from 'framer-motion';
+import { api, NewsData, AnalysisData } from '@/lib/api';
 import { formatEAT } from '@/lib/datetime';
-
-const INTEL_KEY = 'clubmillies_intel_query';
 
 const SOURCE_LABEL: Record<string, string> = {
   news: 'Economic news',
@@ -17,23 +15,11 @@ const SOURCE_LABEL: Record<string, string> = {
   trade_close: 'Performance (after each close)',
 };
 
-function xPostUrl(t: TweetData): string {
-  if (t.url && /^https?:\/\//i.test(t.url)) return t.url;
-  return `https://x.com/i/web/status/${encodeURIComponent(t.tweet_id)}`;
-}
-
 export default function NewsPage() {
   const [news, setNews] = useState<NewsData[]>([]);
   const [analyses, setAnalyses] = useState<AnalysisData[]>([]);
-  const [tweets, setTweets] = useState<TweetData[]>([]);
-  const [intelQuery, setIntelQuery] = useState('');
-  const [intelReady, setIntelReady] = useState(false);
-  const [intelLoading, setIntelLoading] = useState(false);
-  const [intelError, setIntelError] = useState<string | null>(null);
-  const [intelLast, setIntelLast] = useState<string | null>(null);
   const [analyzingId, setAnalyzingId] = useState<number | null>(null);
   const [analyzeErr, setAnalyzeErr] = useState<string | null>(null);
-  const [intelModalTweet, setIntelModalTweet] = useState<TweetData | null>(null);
 
   function isGarbageAnalysis(a: AnalysisData): boolean {
     const r = (a.reasoning || '').toLowerCase();
@@ -41,63 +27,14 @@ export default function NewsPage() {
   }
 
   useEffect(() => {
-    let saved = '';
-    try {
-      saved = localStorage.getItem(INTEL_KEY) || '';
-    } catch {
-      /* ignore */
-    }
-    api
-      .intelConfig()
-      .then((c) => {
-        setIntelQuery(saved || c.default_query || '');
-        setIntelReady(c.sociavault_configured);
-      })
-      .catch(console.error);
-  }, []);
-
-  useEffect(() => {
     function refresh() {
       api.news().then(setNews).catch(console.error);
       api.analyses('limit=40').then(setAnalyses).catch(console.error);
-      api.tweets().then(setTweets).catch(console.error);
     }
     refresh();
     const t = setInterval(refresh, 45_000);
     return () => clearInterval(t);
   }, []);
-
-  useEffect(() => {
-    if (!intelModalTweet) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setIntelModalTweet(null);
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [intelModalTweet]);
-
-  async function handleFetchIntel() {
-    setIntelError(null);
-    setIntelLoading(true);
-    try {
-      const r = await api.fetchIntelTweets(intelQuery.trim() || undefined);
-      setIntelLast(
-        `Found ${r.tweets_found} posts (${r.tweets_new_rows} new). ` +
-          `AI: ${r.analysis.direction} (${r.analysis.confidence}%)`
-      );
-      const tList = await api.tweets();
-      setTweets(tList);
-      try {
-        setAnalyses(await api.analyses('limit=40'));
-      } catch (ae) {
-        console.warn('AI analyses refresh failed after intel fetch:', ae);
-      }
-    } catch (e) {
-      setIntelError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setIntelLoading(false);
-    }
-  }
 
   const grouped = useMemo(() => {
     const g: Record<string, AnalysisData[]> = {};
@@ -140,11 +77,15 @@ export default function NewsPage() {
       <div>
         <h1 className="text-2xl font-bold">News & AI Analysis</h1>
         <p className="text-sm text-gray-500 mt-1 max-w-3xl">
-          AI runs, economic calendar, and intel refresh while this page is open.
+          AI runs and economic calendar while this page is open. X / market intel lives on{' '}
+          <Link href="/intel" className="text-neon-cyan/90 hover:text-neon-cyan underline underline-offset-2">
+            Market intel
+          </Link>
+          .
         </p>
       </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-12 gap-4 items-start">
+      <div className="grid grid-cols-1 xl:grid-cols-8 gap-4 items-start">
         {/* AI Analyses — scrollable compact list */}
         <div className="xl:col-span-5 min-w-0">
           <div className="flex items-center justify-between mb-2 gap-2">
@@ -232,7 +173,7 @@ export default function NewsPage() {
         </div>
 
         {/* Economic Calendar */}
-        <div className="xl:col-span-4 min-w-0">
+        <div className="xl:col-span-3 min-w-0">
           <h2 className="text-lg font-bold text-gray-300 mb-4">Economic Calendar</h2>
           {analyzeErr && (
             <p className="text-xs text-loss mb-2 whitespace-pre-wrap">{analyzeErr}</p>
@@ -286,170 +227,21 @@ export default function NewsPage() {
               </div>
             )}
           </GlowCard>
-        </div>
 
-        {/* Intel — optional manual fetch when backend intel API is configured */}
-        <div className="xl:col-span-3 min-w-0">
-          <h2 className="text-lg font-bold text-gray-300 mb-4">Market intel</h2>
-          <div className="mb-3 space-y-2">
-            <textarea
-              aria-label="Intel search keywords"
-              className="w-full min-h-[72px] bg-dark-100 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder:text-gray-600 focus:border-neon-cyan/40 outline-none resize-y"
-              value={intelQuery}
-              onChange={(e) => {
-                const v = e.target.value;
-                setIntelQuery(v);
-                try {
-                  localStorage.setItem(INTEL_KEY, v);
-                } catch {
-                  /* ignore */
-                }
-              }}
-              placeholder='e.g. gold OR XAUUSD OR DXY OR war'
-              disabled={intelLoading}
-            />
-            <motion.button
-              type="button"
-              onClick={() => handleFetchIntel()}
-              disabled={!intelReady || intelLoading}
-              className="w-full py-2.5 rounded-xl font-medium text-sm bg-neon-cyan/20 text-neon-cyan border border-neon-cyan/40 hover:shadow-glow disabled:opacity-40 disabled:cursor-not-allowed transition-all"
-              whileTap={{ scale: intelReady && !intelLoading ? 0.98 : 1 }}
+          <GlowCard className="mt-4 p-4 border-neon-cyan/15">
+            <p className="text-sm font-semibold text-gray-200 mb-1">Market intel (X)</p>
+            <p className="text-xs text-gray-500 leading-relaxed mb-3">
+              Batch bias, per-post counts, and full-width posts — moved off this page so calendar and AI stay readable.
+            </p>
+            <Link
+              href="/intel"
+              className="inline-flex items-center justify-center w-full py-2.5 rounded-xl text-sm font-medium bg-neon-cyan/15 text-neon-cyan border border-neon-cyan/40 hover:bg-neon-cyan/25"
             >
-              {intelLoading ? 'Fetching…' : 'Fetch intel'}
-            </motion.button>
-            {!intelReady && (
-              <p className="text-xs text-gray-500">Manual intel fetch is not available (API not configured).</p>
-            )}
-            {intelError && <p className="text-xs text-loss whitespace-pre-wrap">{intelError}</p>}
-            {intelLast && !intelError && (
-              <p className="text-xs text-profit/90 border border-profit/20 rounded-lg p-2 bg-profit/5">{intelLast}</p>
-            )}
-          </div>
-          <GlowCard>
-            {tweets.length === 0 ? (
-              <p className="text-gray-600 text-center py-4">No intel items yet — use Fetch when configured.</p>
-            ) : (
-              <div className="space-y-3 max-h-[70vh] overflow-y-auto">
-                {tweets.map((t) => (
-                  <button
-                    key={t.id}
-                    type="button"
-                    onClick={() => setIntelModalTweet(t)}
-                    className="w-full text-left p-3 rounded-lg bg-white/5 border border-white/5 hover:border-neon-cyan/25 hover:bg-white/[0.07] transition-colors"
-                  >
-                    <div className="flex items-center justify-between mb-1 gap-2">
-                      <span className="text-xs text-gray-500">@{t.author}</span>
-                      <div className="flex items-center gap-2 shrink-0">
-                        {t.ai_direction ? (
-                          <NeonBadge
-                            label={t.ai_direction.toUpperCase()}
-                            variant={
-                              t.ai_direction === 'bullish'
-                                ? 'buy'
-                                : t.ai_direction === 'bearish'
-                                  ? 'sell'
-                                  : 'neutral'
-                            }
-                          />
-                        ) : null}
-                        <span className="text-[10px] text-neon-cyan">Details →</span>
-                      </div>
-                    </div>
-                    <p className="text-sm text-gray-400 line-clamp-3 whitespace-pre-wrap">{t.text}</p>
-                    {t.ai_reasoning ? (
-                      <p className="text-xs text-gray-500 mt-2 line-clamp-2 border-t border-white/5 pt-2">
-                        <span className="text-gold/90">Impact: </span>
-                        {t.ai_reasoning}
-                      </p>
-                    ) : (
-                      <p className="text-[10px] text-gray-600 mt-2 italic">Click for full post &amp; AI impact</p>
-                    )}
-                    <p className="text-[10px] text-gray-600 mt-1">
-                      {t.created_at
-                        ? formatEAT(t.created_at)
-                        : t.fetched_at
-                          ? formatEAT(t.fetched_at)
-                          : ''}{' '}
-                      EAT
-                    </p>
-                  </button>
-                ))}
-              </div>
-            )}
+              Open Market intel
+            </Link>
           </GlowCard>
         </div>
       </div>
-
-      {intelModalTweet ? (
-        <div
-          className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
-          role="dialog"
-          aria-modal="true"
-          onClick={() => setIntelModalTweet(null)}
-        >
-          <motion.div
-            initial={{ opacity: 0, y: 12 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="max-w-lg w-full max-h-[min(85vh,640px)] overflow-y-auto rounded-2xl border border-neon-cyan/20 bg-dark-200 p-5 shadow-xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-start justify-between gap-2 mb-3">
-              <div>
-                <p className="text-xs text-gray-500">@{intelModalTweet.author}</p>
-                <p className="text-[10px] text-gray-600 mt-0.5">id {intelModalTweet.tweet_id}</p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setIntelModalTweet(null)}
-                className="text-gray-500 hover:text-white text-sm px-2 py-0.5 rounded-lg border border-white/10"
-              >
-                Close
-              </button>
-            </div>
-            <div className="space-y-4">
-              <div>
-                <p className="text-[10px] font-semibold text-gray-500 uppercase mb-1">Post</p>
-                <p className="text-sm text-gray-200 whitespace-pre-wrap leading-relaxed">{intelModalTweet.text}</p>
-              </div>
-              {intelModalTweet.ai_reasoning ? (
-                <div>
-                  <p className="text-[10px] font-semibold text-gold uppercase mb-1">Gold / XAU — market impact (AI)</p>
-                  <div className="flex items-center gap-2 mb-2">
-                    {intelModalTweet.ai_direction ? (
-                      <NeonBadge
-                        label={intelModalTweet.ai_direction.toUpperCase()}
-                        variant={
-                          intelModalTweet.ai_direction === 'bullish'
-                            ? 'buy'
-                            : intelModalTweet.ai_direction === 'bearish'
-                              ? 'sell'
-                              : 'neutral'
-                        }
-                      />
-                    ) : null}
-                    {intelModalTweet.ai_confidence != null ? (
-                      <span className="text-xs text-gray-400">Confidence {intelModalTweet.ai_confidence}%</span>
-                    ) : null}
-                  </div>
-                  <p className="text-sm text-gray-300 leading-relaxed whitespace-pre-wrap">
-                    {intelModalTweet.ai_reasoning}
-                  </p>
-                </div>
-              ) : (
-                <p className="text-xs text-gray-500">No per-post AI yet — run Fetch intel again with ANTHROPIC_API_KEY on the API server.</p>
-              )}
-              <a
-                href={xPostUrl(intelModalTweet)}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center justify-center w-full py-2.5 rounded-xl text-sm font-medium bg-neon-cyan/15 text-neon-cyan border border-neon-cyan/40 hover:bg-neon-cyan/25"
-              >
-                Open post on X
-              </a>
-            </div>
-          </motion.div>
-        </div>
-      ) : null}
     </div>
   );
 }

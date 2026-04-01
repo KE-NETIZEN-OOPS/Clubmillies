@@ -5,6 +5,7 @@ Analyzes news, tweets, and market conditions for trading insights.
 import asyncio
 import logging
 import json
+import re
 from datetime import datetime
 from typing import Any, Optional
 
@@ -97,6 +98,21 @@ class ClaudeAnalyzer:
                 "_skip_persist": True,
             }
 
+    def _parse_json_from_assistant_text(self, text: str) -> Optional[dict[str, Any]]:
+        """Extract JSON object from Claude output (handles ```json fences and prose)."""
+        raw = (text or "").strip()
+        fence = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", raw, re.IGNORECASE)
+        if fence:
+            raw = fence.group(1).strip()
+        start = raw.find("{")
+        end = raw.rfind("}") + 1
+        if start < 0 or end <= start:
+            return None
+        try:
+            return json.loads(raw[start:end])
+        except json.JSONDecodeError:
+            return None
+
     async def _call_claude_json_object(
         self, system: str, prompt: str, max_tokens: int = 4000
     ) -> Optional[dict[str, Any]]:
@@ -113,10 +129,7 @@ class ClaudeAnalyzer:
                 messages=[{"role": "user", "content": prompt}],
             )
             text = response.content[0].text
-            start = text.find("{")
-            end = text.rfind("}") + 1
-            if start >= 0 and end > start:
-                return json.loads(text[start:end])
+            return self._parse_json_from_assistant_text(text)
         except Exception as e:
             logger.error(f"Claude JSON object parse error: {e}")
         return None
@@ -180,22 +193,66 @@ class ClaudeAnalyzer:
             "confidence": int(summary.get("confidence", 0) or 0),
             "reasoning": (summary.get("reasoning") or "").strip(),
         }
+        per_post = self._normalize_per_post_rows(data.get("posts") or [])
+
+        # Retry: model sometimes returns summary only — ask again for posts only (shorter).
+        if not per_post and capped:
+            per_post = await self._analyze_intel_posts_retry_chunk(capped, search_query)
+
+        return out_summary, per_post
+
+    def _normalize_per_post_rows(self, posts_raw: list) -> list[dict]:
         per_post: list[dict] = []
-        for p in data.get("posts") or []:
+        for p in posts_raw:
             if not isinstance(p, dict):
                 continue
-            tid = str(p.get("tweet_id", "")).strip()
+            tid = str(
+                p.get("tweet_id")
+                or p.get("tweetId")
+                or p.get("id")
+                or ""
+            ).strip()
             if not tid:
                 continue
+            impact = (
+                p.get("market_impact")
+                or p.get("marketImpact")
+                or p.get("impact")
+                or p.get("reasoning")
+                or ""
+            )
             per_post.append(
                 {
                     "tweet_id": tid,
                     "direction": (p.get("direction") or "neutral")[:20],
                     "confidence": int(p.get("confidence", 0) or 0),
-                    "market_impact": (p.get("market_impact") or "")[:8000],
+                    "market_impact": (impact or "")[:8000],
                 }
             )
-        return out_summary, per_post
+        return per_post
+
+    async def _analyze_intel_posts_retry_chunk(
+        self, tweets: list[dict], search_query: str
+    ) -> list[dict]:
+        """Second call: JSON with only posts[] — fixes empty array from first call."""
+        lines = []
+        for t in tweets[:18]:
+            tid = str(t.get("id", "")).strip()
+            txt = (t.get("text") or "").replace("\n", " ").strip()[:400]
+            au = (t.get("author") or "").strip()
+            lines.append(f'tweet_id must be exactly "{tid}"\n@{au}: {txt}')
+        block = "\n---\n".join(lines)
+        system = (
+            "You output ONLY valid JSON. For EACH line block, give gold/XAU/USD market impact. "
+            'Schema: {"posts":[{"tweet_id":"string","direction":"bullish"|"bearish"|"neutral",'
+            '"confidence":0-100,"market_impact":"2-5 sentences"}]} '
+            "tweet_id MUST match the quoted id for that block exactly."
+        )
+        prompt = f"Context: {search_query or 'intel'}\n\n{block}"
+        data = await self._call_claude_json_object(system, prompt, max_tokens=3500)
+        if not data:
+            return []
+        return self._normalize_per_post_rows(data.get("posts") or [])
 
     async def analyze_news(self, event: dict) -> dict:
         """Analyze a news event's impact on gold."""

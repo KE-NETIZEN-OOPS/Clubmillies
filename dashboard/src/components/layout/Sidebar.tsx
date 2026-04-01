@@ -11,6 +11,7 @@ const NAV_ITEMS = [
   { href: '/trades', label: 'Trades', icon: '📋' },
   { href: '/signals', label: 'Signals', icon: '⚡' },
   { href: '/news', label: 'News & AI', icon: '🤖' },
+  { href: '/intel', label: 'Market intel', icon: '🔎' },
   { href: '/settings', label: 'Settings', icon: '⚙️' },
 ];
 
