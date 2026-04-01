@@ -7,7 +7,7 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -18,8 +18,15 @@ from core.config import settings
 from core.database import AsyncSessionLocal, get_session, init_db
 from core.models import Account, Trade, Signal, NewsEvent, AIAnalysis, Tweet
 from core.events import bus
+from core.datetime_eat import period_start_utc_naive
+from core.trade_metrics import directional_rr, aggregate_closed_stats
 
 logger = logging.getLogger("clubmillies.api")
+
+
+def _signal_score_floor() -> int:
+    """Directional signals below this are hidden from UI/API lists (min 5)."""
+    return max(5, int(settings.min_confluence_floor))
 
 app = FastAPI(title="ClubMillies", version="1.0.0")
 
@@ -103,30 +110,43 @@ class AccountUpdate(BaseModel):
 # ── Dashboard Overview ───────────────────────────────────────────────
 
 @app.get("/api/dashboard")
-async def get_dashboard():
+async def get_dashboard(
+    period: Optional[str] = Query(
+        None,
+        description="Filter P&L stats: all (default), today, week, month, 3m, 6m, year",
+    ),
+):
+    from datetime import timezone
+    from core.datetime_eat import EAT
+
     async with AsyncSessionLocal() as session:
         # Accounts
         result = await session.execute(select(Account))
         accounts = result.scalars().all()
 
-        # Today's trades
-        today = datetime.utcnow().date()
+        # Today (calendar day in East Africa Time)
+        now_eat = datetime.now(EAT)
+        today_start_eat = now_eat.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_start_utc = today_start_eat.astimezone(timezone.utc).replace(tzinfo=None)
         result = await session.execute(
             select(Trade).where(
                 Trade.status == "CLOSED",
-                func.date(Trade.closed_at) == today,
+                Trade.closed_at >= today_start_utc,
             )
         )
         todays_trades = result.scalars().all()
 
-        # Total stats
-        result = await session.execute(
-            select(Trade).where(Trade.status == "CLOSED")
-        )
+        result = await session.execute(select(Trade).where(Trade.status == "CLOSED"))
         all_trades = result.scalars().all()
 
-        # Recent signals (hide weak directional setups from the dashboard)
-        floor = int(settings.min_confluence_floor)
+        eff = (period or "all").lower()
+        start = period_start_utc_naive(eff if eff != "all" else None)
+        if start:
+            period_rows = [t for t in all_trades if t.closed_at and t.closed_at >= start]
+        else:
+            period_rows = list(all_trades)
+
+        floor = _signal_score_floor()
         result = await session.execute(
             select(Signal)
             .where(
@@ -144,14 +164,21 @@ async def get_dashboard():
     total_equity = sum(a.equity for a in accounts)
     today_pnl = sum(t.pnl or 0 for t in todays_trades)
     total_pnl = sum(t.pnl or 0 for t in all_trades)
+    period_pnl = sum(t.pnl or 0 for t in period_rows)
     wins = sum(1 for t in all_trades if (t.pnl or 0) > 0)
     win_rate = (wins / len(all_trades) * 100) if all_trades else 0
+    pw = sum(1 for t in period_rows if (t.pnl or 0) > 0)
+    period_win_rate = (pw / len(period_rows) * 100) if period_rows else 0.0
 
     return {
         "total_balance": round(total_balance, 2),
         "total_equity": round(total_equity, 2),
         "today_pnl": round(today_pnl, 2),
         "total_pnl": round(total_pnl, 2),
+        "period": eff,
+        "period_pnl": round(period_pnl, 2),
+        "period_trade_count": len(period_rows),
+        "period_win_rate": round(period_win_rate, 1),
         "total_trades": len(all_trades),
         "today_trades": len(todays_trades),
         "win_rate": round(win_rate, 1),
@@ -171,6 +198,7 @@ async def get_dashboard():
                 "signal": s.signal_type, "score": s.score,
                 "reasons": s.reasons, "price": s.price,
                 "sl": s.sl, "tp": s.tp,
+                "risk_reward": directional_rr(s.price, s.sl, s.tp, s.signal_type),
                 "created_at": s.created_at.isoformat() if s.created_at else None,
             }
             for s in recent_signals
@@ -203,20 +231,33 @@ async def list_accounts():
 
 
 @app.get("/api/accounts/{account_id}")
-async def get_account(account_id: int):
+async def get_account(
+    account_id: int,
+    period: Optional[str] = Query(
+        None,
+        description="Stats window: all, today, week, month, 3m, 6m, year",
+    ),
+):
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(Account).where(Account.id == account_id))
         account = result.scalar_one_or_none()
         if not account:
             raise HTTPException(404, "Account not found")
 
-        closed_r = await session.execute(
+        closed_all_r = await session.execute(
             select(Trade)
             .where(Trade.account_id == account_id, Trade.status == "CLOSED")
             .order_by(desc(Trade.closed_at))
-            .limit(100)
+            .limit(500)
         )
-        closed_trades = closed_r.scalars().all()
+        closed_all = closed_all_r.scalars().all()
+
+        eff = (period or "all").lower()
+        start = period_start_utc_naive(eff if eff != "all" else None)
+        if start:
+            closed_trades = [t for t in closed_all if t.closed_at and t.closed_at >= start][:200]
+        else:
+            closed_trades = list(closed_all)[:200]
 
         open_r = await session.execute(
             select(Trade).where(
@@ -237,10 +278,12 @@ async def get_account(account_id: int):
         )
         latest_perf_ai = ai_r.scalar_one_or_none()
 
+    total_realized_all = sum(t.pnl or 0 for t in closed_all)
     total_realized = sum(t.pnl or 0 for t in closed_trades)
     base = float(account.starting_balance or account.balance or 1)
     roi_pct = round((total_realized / base) * 100, 2) if base else 0.0
     wins = sum(1 for t in closed_trades if (t.pnl or 0) > 0)
+    agg = aggregate_closed_stats(closed_trades)
 
     def _trade_row(t: Trade):
         return {
@@ -257,6 +300,7 @@ async def get_account(account_id: int):
             "opened_at": t.opened_at.isoformat() if t.opened_at else None,
             "closed_at": t.closed_at.isoformat() if t.closed_at else None,
             "mt5_position_ticket": getattr(t, "mt5_position_ticket", None),
+            "risk_reward": directional_rr(t.entry_price, t.sl, t.tp, t.direction),
         }
 
     is_demo = account.is_demo
@@ -279,13 +323,20 @@ async def get_account(account_id: int):
         "equity": account.equity,
         "starting_balance": getattr(account, "starting_balance", None) or account.balance,
         "enabled": account.enabled,
+        "period": eff,
         "stats": {
             "total_realized_pnl": round(total_realized, 2),
-            "closed_trade_count": len(closed_trades),
+            "total_realized_pnl_all_time": round(total_realized_all, 2),
+            "closed_trade_count": agg["closed_trade_count"],
             "open_trade_count": len(open_trades),
-            "win_count": wins,
-            "win_rate_pct": round(wins / len(closed_trades) * 100, 1) if closed_trades else 0.0,
+            "win_count": agg["win_count"],
+            "loss_count": agg["loss_count"],
+            "win_rate_pct": agg["win_rate_pct"],
             "roi_vs_starting_balance_pct": roi_pct,
+            "best_trade": agg["best_trade"],
+            "worst_trade": agg["worst_trade"],
+            "avg_risk_reward": agg["avg_rr"],
+            "profit_factor": agg["profit_factor"],
         },
         "closed_trades": [_trade_row(t) for t in closed_trades],
         "open_trades": [_trade_row(t) for t in open_trades],
@@ -443,7 +494,7 @@ async def list_signals(
     limit: int = 50,
     min_score: Optional[int] = None,
 ):
-    floor = int(settings.min_confluence_floor) if min_score is None else int(min_score)
+    floor = _signal_score_floor() if min_score is None else max(5, int(min_score))
     async with AsyncSessionLocal() as session:
         query = (
             select(Signal)
@@ -466,6 +517,7 @@ async def list_signals(
             "id": s.id, "account_id": s.account_id, "signal": s.signal_type,
             "score": s.score, "max_score": s.max_score, "reasons": s.reasons,
             "price": s.price, "sl": s.sl, "tp": s.tp,
+            "risk_reward": directional_rr(s.price, s.sl, s.tp, s.signal_type),
             "rsi": s.rsi, "atr": s.atr,
             "created_at": s.created_at.isoformat() if s.created_at else None,
         }
@@ -551,53 +603,92 @@ async def intel_fetch_tweets(body: IntelFetchBody):
 
 @app.get("/api/live")
 async def live_snapshot():
-    """Open positions with approximate floating P/L using Yahoo spot (GC=F)."""
+    """Open positions: MT5 terminal profit when engine is running; else DB + Yahoo spot estimate."""
     from intelligence.spot_price import estimate_open_pnl, fetch_xau_usd_spot
 
     spot = await fetch_xau_usd_spot()
     contract_size = 100.0
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(Trade)
-            .where(Trade.status == "OPEN")
-            .order_by(desc(Trade.opened_at))
-            .limit(40)
-        )
-        rows = result.scalars().all()
-
+    mgr = getattr(app.state, "account_manager", None)
     open_trades = []
     total_unrealized = 0.0
-    for t in rows:
-        u = None
-        if spot and t.entry_price and t.direction:
-            u = estimate_open_pnl(
-                t.direction,
-                float(t.entry_price),
-                float(t.lots or 0),
-                contract_size,
-                float(spot),
+    used_mt5 = False
+
+    if mgr and getattr(mgr, "runners", None):
+        async with AsyncSessionLocal() as session:
+            acc_r = await session.execute(select(Account))
+            acc_by_id = {a.id: a for a in acc_r.scalars().all()}
+        for aid, runner in mgr.runners.items():
+            if runner.broker_type != "mt5" or not runner.broker:
+                continue
+            await asyncio.to_thread(runner.broker.tick)
+            sym = getattr(runner.broker, "symbol", "") or ""
+            aname = acc_by_id.get(aid)
+            name = aname.name if aname else f"#{aid}"
+            for p in runner.broker.positions or []:
+                used_mt5 = True
+                profit = float(p.get("profit", 0) or 0)
+                total_unrealized += profit
+                open_trades.append({
+                    "id": int(p.get("ticket", 0)),
+                    "account_id": aid,
+                    "account_name": name,
+                    "direction": p.get("direction"),
+                    "entry_price": p.get("entry"),
+                    "lots": p.get("lots"),
+                    "sl": p.get("sl"),
+                    "tp": p.get("tp"),
+                    "confluence_score": None,
+                    "unrealized_pnl": round(profit, 2),
+                    "opened_at": None,
+                    "mt5_position_ticket": int(p.get("ticket", 0)),
+                    "symbol": sym,
+                    "source": "mt5",
+                })
+
+    if not used_mt5:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(Trade)
+                .where(Trade.status == "OPEN")
+                .order_by(desc(Trade.opened_at))
+                .limit(40)
             )
-            u = round(u, 2)
-            total_unrealized += u
-        open_trades.append({
-            "id": t.id,
-            "account_id": t.account_id,
-            "direction": t.direction,
-            "entry_price": t.entry_price,
-            "lots": t.lots,
-            "sl": t.sl,
-            "tp": t.tp,
-            "confluence_score": t.confluence_score,
-            "unrealized_pnl": u,
-            "opened_at": t.opened_at.isoformat() if t.opened_at else None,
-            "mt5_position_ticket": getattr(t, "mt5_position_ticket", None),
-        })
+            rows = result.scalars().all()
+        for t in rows:
+            u = None
+            if spot and t.entry_price and t.direction:
+                u = estimate_open_pnl(
+                    t.direction,
+                    float(t.entry_price),
+                    float(t.lots or 0),
+                    contract_size,
+                    float(spot),
+                )
+                u = round(u, 2)
+                total_unrealized += u
+            open_trades.append({
+                "id": t.id,
+                "account_id": t.account_id,
+                "account_name": None,
+                "direction": t.direction,
+                "entry_price": t.entry_price,
+                "lots": t.lots,
+                "sl": t.sl,
+                "tp": t.tp,
+                "confluence_score": t.confluence_score,
+                "unrealized_pnl": u,
+                "opened_at": t.opened_at.isoformat() if t.opened_at else None,
+                "mt5_position_ticket": getattr(t, "mt5_position_ticket", None),
+                "symbol": None,
+                "source": "db_estimate",
+            })
 
     return {
         "spot_xauusd": spot,
         "open_trades": open_trades,
         "total_unrealized_pnl": round(total_unrealized, 2),
         "updated_at": datetime.utcnow().isoformat(),
+        "source": "mt5" if used_mt5 else "db_estimate",
     }
 
 
@@ -620,6 +711,51 @@ async def list_news(limit: int = 20):
         }
         for n in events
     ]
+
+
+@app.post("/api/news/{news_id}/analyze")
+async def analyze_news_item(news_id: int):
+    """On-demand Claude analysis for one calendar row + surrounding events (XAU/USD focus)."""
+    from intelligence.claude_analyzer import ClaudeAnalyzer
+
+    async with AsyncSessionLocal() as session:
+        r = await session.execute(select(NewsEvent).where(NewsEvent.id == news_id))
+        row = r.scalar_one_or_none()
+        if not row:
+            raise HTTPException(404, "News event not found")
+        cal_r = await session.execute(
+            select(NewsEvent).order_by(NewsEvent.event_time).limit(40)
+        )
+        cal = cal_r.scalars().all()
+
+    ev = {
+        "id": row.id,
+        "title": row.title,
+        "currency": row.currency,
+        "impact": row.impact,
+        "forecast": row.forecast,
+        "previous": row.previous,
+        "actual": row.actual,
+        "event_time": row.event_time.isoformat() if row.event_time else None,
+    }
+    cal_dicts = [
+        {
+            "id": n.id,
+            "title": n.title,
+            "currency": n.currency,
+            "impact": n.impact,
+            "forecast": n.forecast,
+            "previous": n.previous,
+            "actual": n.actual,
+            "event_time": n.event_time.isoformat() if n.event_time else None,
+        }
+        for n in cal
+    ]
+    analyzer = ClaudeAnalyzer()
+    if not analyzer.enabled:
+        raise HTTPException(503, "ANTHROPIC_API_KEY is not set on the API server.")
+    result = await analyzer.analyze_news_item_with_calendar(ev, cal_dicts)
+    return {"analysis": result, "event": ev}
 
 
 @app.get("/api/ai-analyses")

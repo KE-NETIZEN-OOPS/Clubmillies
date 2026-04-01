@@ -5,9 +5,13 @@ import GlowCard from '@/components/ui/GlowCard';
 import NeonBadge from '@/components/ui/NeonBadge';
 import { api, NewsData, AnalysisData, TweetData } from '@/lib/api';
 import { motion } from 'framer-motion';
+import { formatEAT } from '@/lib/datetime';
+
+const INTEL_KEY = 'clubmillies_intel_query';
 
 const SOURCE_LABEL: Record<string, string> = {
   news: 'Economic news',
+  news_calendar: 'Calendar deep-dive (on-demand)',
   twitter: 'Twitter / headlines batch',
   market: 'Market snapshot',
   trade_close: 'Performance (after each close)',
@@ -22,15 +26,23 @@ export default function NewsPage() {
   const [intelLoading, setIntelLoading] = useState(false);
   const [intelError, setIntelError] = useState<string | null>(null);
   const [intelLast, setIntelLast] = useState<string | null>(null);
+  const [analyzingId, setAnalyzingId] = useState<number | null>(null);
+  const [analyzeErr, setAnalyzeErr] = useState<string | null>(null);
 
   useEffect(() => {
     api.news().then(setNews).catch(console.error);
     api.analyses('limit=40').then(setAnalyses).catch(console.error);
     api.tweets().then(setTweets).catch(console.error);
+    let saved = '';
+    try {
+      saved = localStorage.getItem(INTEL_KEY) || '';
+    } catch {
+      /* ignore */
+    }
     api
       .intelConfig()
       .then((c) => {
-        setIntelQuery(c.default_query || '');
+        setIntelQuery(saved || c.default_query || '');
         setIntelReady(c.sociavault_configured);
       })
       .catch(console.error);
@@ -68,7 +80,20 @@ export default function NewsPage() {
     return g;
   }, [analyses]);
 
-  const order = ['trade_close', 'market', 'news', 'twitter', 'other'];
+  async function analyzeEvent(id: number) {
+    setAnalyzeErr(null);
+    setAnalyzingId(id);
+    try {
+      await api.analyzeNews(id);
+      setAnalyses(await api.analyses('limit=40'));
+    } catch (e) {
+      setAnalyzeErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAnalyzingId(null);
+    }
+  }
+
+  const order = ['trade_close', 'market', 'news', 'news_calendar', 'twitter', 'other'];
   const keysToShow = [
     ...order.filter((k) => grouped[k]?.length),
     ...Object.keys(grouped).filter((k) => !order.includes(k)),
@@ -157,7 +182,7 @@ export default function NewsPage() {
                             </details>
                           )}
                           <p className="text-[10px] text-gray-600 mt-2">
-                            {new Date(a.created_at).toLocaleString()}
+                            {formatEAT(a.created_at)} EAT
                           </p>
                         </GlowCard>
                       ))}
@@ -171,6 +196,9 @@ export default function NewsPage() {
         {/* Economic Calendar */}
         <div>
           <h2 className="text-lg font-bold text-gray-300 mb-4">Economic Calendar</h2>
+          {analyzeErr && (
+            <p className="text-xs text-loss mb-2 whitespace-pre-wrap">{analyzeErr}</p>
+          )}
           <GlowCard>
             {news.length === 0 ? (
               <p className="text-gray-600 text-center py-4">No events loaded yet (wait for monitor)</p>
@@ -204,8 +232,16 @@ export default function NewsPage() {
                         {n.actual && <span className="text-white font-bold">Actual: {n.actual}</span>}
                       </div>
                       <p className="text-[10px] text-gray-600 mt-1">
-                        {new Date(n.event_time).toLocaleString()}
+                        {formatEAT(n.event_time)} EAT
                       </p>
+                      <button
+                        type="button"
+                        onClick={() => analyzeEvent(n.id)}
+                        disabled={analyzingId === n.id}
+                        className="mt-2 text-xs px-2 py-1 rounded-lg border border-neon-cyan/30 text-neon-cyan hover:bg-neon-cyan/10 disabled:opacity-40"
+                      >
+                        {analyzingId === n.id ? 'Analyzing…' : 'AI: analyze this event'}
+                      </button>
                     </div>
                   );
                 })}
@@ -229,7 +265,15 @@ export default function NewsPage() {
             <textarea
               className="w-full min-h-[72px] bg-dark-100 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder:text-gray-600 focus:border-neon-cyan/40 outline-none resize-y"
               value={intelQuery}
-              onChange={(e) => setIntelQuery(e.target.value)}
+              onChange={(e) => {
+                const v = e.target.value;
+                setIntelQuery(v);
+                try {
+                  localStorage.setItem(INTEL_KEY, v);
+                } catch {
+                  /* ignore */
+                }
+              }}
               placeholder='e.g. gold OR XAUUSD OR DXY OR war'
               disabled={intelLoading}
             />
@@ -277,10 +321,11 @@ export default function NewsPage() {
                     <p className="text-sm text-gray-400 whitespace-pre-wrap">{t.text}</p>
                     <p className="text-[10px] text-gray-600 mt-2">
                       {t.created_at
-                        ? new Date(t.created_at).toLocaleString()
+                        ? formatEAT(t.created_at)
                         : t.fetched_at
-                          ? new Date(t.fetched_at).toLocaleString()
-                          : ''}
+                          ? formatEAT(t.fetched_at)
+                          : ''}{' '}
+                      EAT
                     </p>
                   </div>
                 ))}

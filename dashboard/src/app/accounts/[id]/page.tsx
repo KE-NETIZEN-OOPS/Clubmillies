@@ -7,25 +7,37 @@ import { motion } from 'framer-motion';
 import GlowCard from '@/components/ui/GlowCard';
 import NeonBadge from '@/components/ui/NeonBadge';
 import { api, AccountDetailData } from '@/lib/api';
+import { formatEAT } from '@/lib/datetime';
+
+const PROFIT_PERIODS = [
+  { value: 'all', label: 'All time' },
+  { value: 'today', label: 'Today' },
+  { value: 'week', label: 'Week' },
+  { value: 'month', label: '1 month' },
+  { value: '3m', label: '3 months' },
+  { value: '6m', label: '6 months' },
+  { value: 'year', label: '1 year' },
+] as const;
 
 export default function AccountDetailPage() {
   const params = useParams();
   const id = Number(params.id);
   const [data, setData] = useState<AccountDetailData | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [profitPeriod, setProfitPeriod] = useState<string>('all');
 
   useEffect(() => {
     if (!id) return;
     (async () => {
       try {
-        setData(await api.account(id));
+        setData(await api.account(id, profitPeriod));
         setErr(null);
       } catch (e) {
         setErr('Could not load account');
         console.error(e);
       }
     })();
-  }, [id]);
+  }, [id, profitPeriod]);
 
   if (err) {
     return (
@@ -60,6 +72,24 @@ export default function AccountDetailPage() {
         </Link>
         <h1 className="text-2xl font-bold">{data.name}</h1>
         <NeonBadge label={data.profile} variant={data.profile === 'SNIPER' ? 'sniper' : 'aggressive'} />
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs text-gray-500">Profit &amp; stats:</span>
+        {PROFIT_PERIODS.map((p) => (
+          <button
+            key={p.value}
+            type="button"
+            onClick={() => setProfitPeriod(p.value)}
+            className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
+              profitPeriod === p.value
+                ? 'border-neon-cyan/60 bg-neon-cyan/10 text-neon-cyan'
+                : 'border-white/10 bg-white/5 text-gray-400 hover:border-white/20'
+            }`}
+          >
+            {p.label}
+          </button>
+        ))}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -105,7 +135,7 @@ export default function AccountDetailPage() {
               </dd>
             </div>
             <div className="flex justify-between gap-4">
-              <dt className="text-gray-500">Total realized P/L</dt>
+              <dt className="text-gray-500">Realized P/L (window)</dt>
               <dd
                 className={`font-mono font-medium ${
                   data.stats.total_realized_pnl >= 0 ? 'text-profit' : 'text-loss'
@@ -115,6 +145,15 @@ export default function AccountDetailPage() {
                 ${data.stats.total_realized_pnl.toFixed(2)}
               </dd>
             </div>
+            {data.stats.total_realized_pnl_all_time != null && profitPeriod !== 'all' && (
+              <div className="flex justify-between gap-4">
+                <dt className="text-gray-500">All-time realized</dt>
+                <dd className="font-mono text-gray-400">
+                  {data.stats.total_realized_pnl_all_time >= 0 ? '+' : ''}$
+                  {data.stats.total_realized_pnl_all_time.toFixed(2)}
+                </dd>
+              </div>
+            )}
             <div className="flex justify-between gap-4">
               <dt className="text-gray-500">ROI vs starting</dt>
               <dd
@@ -127,12 +166,38 @@ export default function AccountDetailPage() {
               </dd>
             </div>
             <div className="flex justify-between gap-4">
-              <dt className="text-gray-500">Closed trades</dt>
-              <dd className="font-mono">{data.stats.closed_trade_count}</dd>
+              <dt className="text-gray-500">Closed / open</dt>
+              <dd className="font-mono">
+                {data.stats.closed_trade_count} / {data.stats.open_trade_count}
+              </dd>
             </div>
             <div className="flex justify-between gap-4">
-              <dt className="text-gray-500">Win rate (closed)</dt>
+              <dt className="text-gray-500">Win / loss (closed)</dt>
+              <dd className="font-mono">
+                {data.stats.win_count}W · {data.stats.loss_count ?? 0}L
+              </dd>
+            </div>
+            <div className="flex justify-between gap-4">
+              <dt className="text-gray-500">Win rate</dt>
               <dd className="font-mono">{data.stats.win_rate_pct}%</dd>
+            </div>
+            <div className="flex justify-between gap-4">
+              <dt className="text-gray-500">Best / worst trade</dt>
+              <dd className="font-mono text-right">
+                <span className="text-profit">+${(data.stats.best_trade ?? 0).toFixed(2)}</span>
+                {' · '}
+                <span className="text-loss">${(data.stats.worst_trade ?? 0).toFixed(2)}</span>
+              </dd>
+            </div>
+            <div className="flex justify-between gap-4">
+              <dt className="text-gray-500">Avg R:R (plan)</dt>
+              <dd className="font-mono">
+                {data.stats.avg_risk_reward != null ? `1:${data.stats.avg_risk_reward}` : '—'}
+              </dd>
+            </div>
+            <div className="flex justify-between gap-4">
+              <dt className="text-gray-500">Profit factor</dt>
+              <dd className="font-mono">{data.stats.profit_factor ?? '—'}</dd>
             </div>
           </dl>
         </GlowCard>
@@ -164,7 +229,8 @@ export default function AccountDetailPage() {
                   <th className="pb-2 pr-2">Entry</th>
                   <th className="pb-2 pr-2">Lots</th>
                   <th className="pb-2 pr-2">MT5 #</th>
-                  <th className="pb-2">Opened</th>
+                  <th className="pb-2 pr-2">R:R</th>
+                  <th className="pb-2">Opened (EAT)</th>
                 </tr>
               </thead>
               <tbody>
@@ -174,7 +240,10 @@ export default function AccountDetailPage() {
                     <td className="font-mono py-2 pr-2">{t.entry_price?.toFixed(2)}</td>
                     <td className="py-2 pr-2">{t.lots}</td>
                     <td className="font-mono py-2 pr-2">{t.mt5_position_ticket ?? '—'}</td>
-                    <td className="text-gray-500 py-2">{t.opened_at?.slice(0, 16)}</td>
+                    <td className="font-mono py-2 pr-2 text-xs text-gray-500">
+                      {t.risk_reward != null ? `1:${t.risk_reward}` : '—'}
+                    </td>
+                    <td className="text-gray-500 py-2 text-xs">{t.opened_at ? formatEAT(t.opened_at) : '—'}</td>
                   </tr>
                 ))}
               </tbody>
@@ -197,7 +266,8 @@ export default function AccountDetailPage() {
                   <th className="pb-2 pr-2">Exit</th>
                   <th className="pb-2 pr-2">P/L</th>
                   <th className="pb-2 pr-2">Reason</th>
-                  <th className="pb-2">Closed</th>
+                  <th className="pb-2 pr-2">R:R</th>
+                  <th className="pb-2">Closed (EAT)</th>
                 </tr>
               </thead>
               <tbody>
@@ -220,7 +290,12 @@ export default function AccountDetailPage() {
                       ${(t.pnl ?? 0).toFixed(2)}
                     </td>
                     <td className="py-2 pr-2 text-gray-400">{t.close_reason ?? '—'}</td>
-                    <td className="text-gray-500 py-2">{t.closed_at?.slice(0, 16) ?? '—'}</td>
+                    <td className="font-mono py-2 pr-2 text-xs text-gray-500">
+                      {t.risk_reward != null ? `1:${t.risk_reward}` : '—'}
+                    </td>
+                    <td className="text-gray-500 py-2 text-xs">
+                      {t.closed_at ? formatEAT(t.closed_at) : '—'}
+                    </td>
                   </motion.tr>
                 ))}
               </tbody>

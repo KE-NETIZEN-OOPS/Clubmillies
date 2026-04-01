@@ -8,9 +8,11 @@ import json
 from datetime import datetime
 from typing import Optional
 
+from sqlalchemy import select, desc
+
 from core.config import settings
 from core.database import AsyncSessionLocal
-from core.models import AIAnalysis
+from core.models import AIAnalysis, NewsEvent
 from core.events import bus, AI_ANALYSIS
 
 logger = logging.getLogger("clubmillies.ai")
@@ -122,10 +124,28 @@ class ClaudeAnalyzer:
             chunks.append(f"@{t.get('author', '?')}: {txt}")
         tweet_text = "\n".join(chunks)
 
+        cal_snip = ""
+        try:
+            async with AsyncSessionLocal() as session:
+                nr = await session.execute(
+                    select(NewsEvent).order_by(desc(NewsEvent.event_time)).limit(18)
+                )
+                evs = nr.scalars().all()
+            if evs:
+                lines = [
+                    f"- {e.title} ({e.currency}, {e.impact})"
+                    for e in evs
+                ]
+                cal_snip = "\n\nRecent economic calendar (cross-check with headlines):\n" + "\n".join(
+                    lines
+                )
+        except Exception as e:
+            logger.debug(f"Calendar snippet skipped: {e}")
+
         prompt = (
             f"Search context: {search_query or 'manual fetch'}\n\n"
             f"Analyze these posts for gold (XAU/USD), USD/DXY, geopolitical risk, and risk sentiment.\n\n"
-            f"{tweet_text}"
+            f"{tweet_text}{cal_snip}"
         )
 
         result = await self._call_claude(system, prompt, max_tokens=1400)
@@ -170,6 +190,58 @@ class ClaudeAnalyzer:
 
         result = await self._call_claude(system, prompt)
         await self._save_analysis("market", prompt[:500], result)
+        return result
+
+    async def analyze_news_item_with_calendar(
+        self,
+        event: dict,
+        calendar_events: list[dict],
+    ) -> dict:
+        """
+        Deep analysis for a single calendar/news row + surrounding economic context.
+        """
+        system = (
+            "You are a professional gold (XAU/USD) strategist. "
+            "Given one economic release and nearby calendar context, assess likely direction for gold "
+            "over the next sessions. Respond ONLY with JSON: "
+            '{"direction":"bullish"|"bearish"|"neutral", "confidence":0-100, '
+            '"verdict":"1-2 sentence where gold could head", '
+            '"reasoning":"2-5 sentences: link the event, surprise vs forecast, USD real yields/DXY angle, '
+            "and how nearby calendar risks could amplify or fade the move.\"}"
+        )
+        cal_lines = []
+        for c in calendar_events[:25]:
+            cal_lines.append(
+                f"- {c.get('title', '')} | {c.get('currency', '')} | "
+                f"{c.get('impact', '')} | t={c.get('event_time', '')}"
+            )
+        prompt = (
+            f"PRIMARY EVENT (analyze this in depth):\n"
+            f"Title: {event.get('title')}\n"
+            f"Currency: {event.get('currency')}\n"
+            f"Impact: {event.get('impact')}\n"
+            f"Forecast: {event.get('forecast')}\n"
+            f"Previous: {event.get('previous')}\n"
+            f"Actual: {event.get('actual')}\n"
+            f"Event time: {event.get('event_time')}\n\n"
+            f"RELATED ECONOMIC CALENDAR (context — not all need equal weight):\n"
+            + "\n".join(cal_lines)
+        )
+        result = await self._call_claude(system, prompt, max_tokens=900)
+        v = result.get("verdict")
+        rs = result.get("reasoning") or ""
+        if v and isinstance(rs, str) and str(v) not in rs:
+            result["reasoning"] = f"{v}\n\n{rs}"
+        metrics = {
+            "focus_event_id": event.get("id"),
+            "calendar_context_count": len(calendar_events),
+        }
+        await self._save_analysis(
+            "news_calendar",
+            str(event.get("title", ""))[:500],
+            result,
+            metrics=metrics,
+        )
         return result
 
     async def _save_analysis(

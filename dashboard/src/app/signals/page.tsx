@@ -6,6 +6,7 @@ import GlowCard from '@/components/ui/GlowCard';
 import NeonBadge from '@/components/ui/NeonBadge';
 import { api, SignalData } from '@/lib/api';
 import { useWebSocket } from '@/lib/websocket';
+import { formatEAT } from '@/lib/datetime';
 
 const CONFLUENCE_FACTORS = [
   { key: 'EMA_TREND', label: 'EMA Trend', weight: 1 },
@@ -26,7 +27,11 @@ export default function SignalsPage() {
   useEffect(() => { loadSignals(); }, []);
 
   async function loadSignals() {
-    try { setSignals(await api.signals()); } catch (e) { console.error(e); }
+    try {
+      setSignals(await api.signals('min_score=5'));
+    } catch (e) {
+      console.error(e);
+    }
   }
 
   const latestSignal = signals[0];
@@ -49,9 +54,10 @@ export default function SignalsPage() {
               size="md"
             />
           </div>
-          <div className="grid grid-cols-3 gap-4 mb-4">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
             <div><p className="text-gray-500 text-xs">Price</p><p className="font-mono text-xl">${latestSignal.price?.toFixed(2)}</p></div>
             <div><p className="text-gray-500 text-xs">Score</p><p className="text-xl font-bold text-gold">{latestSignal.score}/15</p></div>
+            <div><p className="text-gray-500 text-xs">R:R (plan)</p><p className="text-xl font-mono text-neon-cyan">{latestSignal.risk_reward != null ? `1:${latestSignal.risk_reward}` : '—'}</p></div>
             <div><p className="text-gray-500 text-xs">RSI</p><p className="text-xl">{latestSignal.rsi?.toFixed(1) || '-'}</p></div>
           </div>
 
@@ -105,7 +111,7 @@ export default function SignalsPage() {
                 ))}
               </div>
               <span className="text-xs text-gray-600 shrink-0">
-                {sig.created_at ? new Date(sig.created_at).toLocaleTimeString() : '-'}
+                {sig.created_at ? formatEAT(sig.created_at) : '-'}
               </span>
             </motion.div>
           ))}

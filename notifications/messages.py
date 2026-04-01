@@ -83,6 +83,7 @@ def signal_msg(data: dict) -> str:
     sl = data.get("sl")
     tp = data.get("tp")
     score = data.get("score", 0)
+    rr = data.get("risk_reward")
     bar = _power_bar(score)
 
     msg = (
@@ -93,6 +94,8 @@ def signal_msg(data: dict) -> str:
         msg += f"🛑 Stop Loss: <code>${sl:.2f}</code>\n"
     if tp is not None:
         msg += f"🎯 Take Profit: <code>${tp:.2f}</code>\n"
+    if rr is not None:
+        msg += f"⚖️ Risk:Reward (TP vs SL): <b>1 : {float(rr):.2f}</b>\n"
     msg += (
         f"\n⚡ Power: {bar} <b>{score}/15</b>\n\n"
         f"<i>ClubMillies Master Signals — {random.choice(WEALTH_MOTIVATION)}</i>"

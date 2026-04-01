@@ -110,6 +110,13 @@ class MT5LiveBroker:
         """Update balance and positions from MT5."""
         if not self.mt5:
             return
+        # Ensure symbol is visible (e.g. XAUUSD.s on JustMarkets)
+        try:
+            si = self.mt5.symbol_info(self.symbol)
+            if si is not None and not getattr(si, "visible", True):
+                self.mt5.symbol_select(self.symbol, True)
+        except Exception:
+            pass
         info = self.mt5.account_info()
         if info:
             self.balance = info.balance
@@ -822,6 +829,11 @@ class AccountRunner:
             await session.commit()
 
         floor = int(settings.min_confluence_floor)
+        rr = None
+        if sl is not None and tp is not None and price and sig_type in ("BUY", "SELL"):
+            from core.trade_metrics import directional_rr
+
+            rr = directional_rr(float(price), float(sl), float(tp), sig_type)
         if (
             signal != 0
             and score >= floor
@@ -831,6 +843,7 @@ class AccountRunner:
                 "account_id": self.account_id, "signal": sig_type,
                 "score": score, "reasons": reasons, "price": price,
                 "sl": sl, "tp": tp,
+                "risk_reward": rr,
             })
 
 

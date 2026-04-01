@@ -21,10 +21,16 @@ export async function fetchApi<T>(path: string, options?: RequestInit): Promise<
 }
 
 export const api = {
-  dashboard: () => fetchApi<DashboardData>('/api/dashboard'),
+  dashboard: (period?: string) =>
+    fetchApi<DashboardData>(
+      `/api/dashboard${period && period !== 'all' ? `?period=${encodeURIComponent(period)}` : ''}`
+    ),
   live: () => fetchApi<LiveSnapshot>('/api/live'),
   accounts: () => fetchApi<AccountData[]>('/api/accounts'),
-  account: (id: number) => fetchApi<AccountDetailData>(`/api/accounts/${id}`),
+  account: (id: number, period?: string) =>
+    fetchApi<AccountDetailData>(
+      `/api/accounts/${id}${period && period !== 'all' ? `?period=${encodeURIComponent(period)}` : ''}`
+    ),
   createAccount: (data: any) => fetchApi('/api/accounts', { method: 'POST', body: JSON.stringify(data) }),
   updateAccount: (id: number, data: any) => fetchApi(`/api/accounts/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteAccount: (id: number) => fetchApi(`/api/accounts/${id}`, { method: 'DELETE' }),
@@ -32,6 +38,11 @@ export const api = {
   trades: (params?: string) => fetchApi<TradeData[]>(`/api/trades${params ? '?' + params : ''}`),
   signals: (params?: string) => fetchApi<SignalData[]>(`/api/signals${params ? '?' + params : ''}`),
   news: () => fetchApi<NewsData[]>('/api/news'),
+  analyzeNews: (id: number) =>
+    fetchApi<{ analysis: NewsAnalysisResult; event: Record<string, unknown> }>(
+      `/api/news/${id}/analyze`,
+      { method: 'POST' }
+    ),
   analyses: (params?: string) => {
     const q =
       !params ? '' : params.startsWith('?') ? params : `?${params}`;
@@ -54,6 +65,10 @@ export interface DashboardData {
   total_equity: number;
   today_pnl: number;
   total_pnl: number;
+  period?: string;
+  period_pnl?: number;
+  period_trade_count?: number;
+  period_win_rate?: number;
   total_trades: number;
   today_trades: number;
   win_rate: number;
@@ -98,13 +113,20 @@ export interface AccountDetailData {
   equity: number;
   starting_balance: number;
   enabled: boolean;
+  period?: string;
   stats: {
     total_realized_pnl: number;
+    total_realized_pnl_all_time?: number;
     closed_trade_count: number;
     open_trade_count: number;
     win_count: number;
+    loss_count?: number;
     win_rate_pct: number;
     roi_vs_starting_balance_pct: number;
+    best_trade?: number;
+    worst_trade?: number;
+    avg_risk_reward?: number | null;
+    profit_factor?: number | null;
   };
   closed_trades: TradeData[];
   open_trades: TradeData[];
@@ -135,6 +157,7 @@ export interface TradeData {
   opened_at: string;
   closed_at: string | null;
   mt5_position_ticket?: number | null;
+  risk_reward?: number | null;
 }
 
 export interface SignalData {
@@ -149,7 +172,15 @@ export interface SignalData {
   tp?: number | null;
   rsi?: number;
   atr?: number;
+  risk_reward?: number | null;
   created_at: string | null;
+}
+
+export interface NewsAnalysisResult {
+  direction?: string;
+  confidence?: number;
+  reasoning?: string;
+  verdict?: string;
 }
 
 export interface NewsData {
@@ -211,18 +242,22 @@ export interface IntelFetchResult {
 
 export interface LiveSnapshot {
   spot_xauusd: number | null;
+  source?: string;
   open_trades: Array<{
     id: number;
     account_id: number;
+    account_name?: string | null;
     direction: string;
     entry_price: number;
     lots: number;
     sl: number;
     tp: number;
-    confluence_score: number;
+    confluence_score: number | null;
     unrealized_pnl: number | null;
     opened_at: string | null;
     mt5_position_ticket?: number | null;
+    symbol?: string | null;
+    source?: string;
   }>;
   total_unrealized_pnl: number;
   updated_at: string;

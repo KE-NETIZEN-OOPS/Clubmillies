@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import GlowCard from '@/components/ui/GlowCard';
 import NeonBadge from '@/components/ui/NeonBadge';
 import { api, TradeData } from '@/lib/api';
+import { formatEAT } from '@/lib/datetime';
 
 export default function TradesPage() {
   const [trades, setTrades] = useState<TradeData[]>([]);
@@ -73,7 +74,7 @@ export default function TradesPage() {
                 <th className="text-left py-3 px-2">Score</th>
                 <th className="text-left py-3 px-2">Reason</th>
                 <th className="text-left py-3 px-2">Status</th>
-                <th className="text-left py-3 px-2">Time</th>
+                <th className="text-left py-3 px-2">Opened (EAT)</th>
               </tr>
             </thead>
             <tbody>
@@ -94,7 +95,7 @@ export default function TradesPage() {
                     <NeonBadge label={t.status} variant={t.status === 'OPEN' ? 'buy' : 'neutral'} />
                   </td>
                   <td className="py-2 px-2 text-gray-500 text-xs">
-                    {t.opened_at ? new Date(t.opened_at).toLocaleString() : '-'}
+                    {t.opened_at ? formatEAT(t.opened_at) : '-'}
                   </td>
                 </tr>
               ))}

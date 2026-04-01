@@ -1,8 +1,31 @@
 'use client';
 
+import { useEffect, useState } from 'react';
 import GlowCard from '@/components/ui/GlowCard';
 
+const INTEL_KEY = 'clubmillies_intel_query';
+
 export default function SettingsPage() {
+  const [intelQuery, setIntelQuery] = useState('');
+
+  useEffect(() => {
+    try {
+      const s = localStorage.getItem(INTEL_KEY);
+      if (s) setIntelQuery(s);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  function persistIntel(q: string) {
+    setIntelQuery(q);
+    try {
+      localStorage.setItem(INTEL_KEY, q);
+    } catch {
+      /* ignore */
+    }
+  }
+
   return (
     <div className="space-y-6 max-w-2xl">
       <h1 className="text-2xl font-bold">Settings</h1>
@@ -66,13 +89,18 @@ export default function SettingsPage() {
       </GlowCard>
 
       <GlowCard>
-        <h2 className="text-lg font-bold mb-4">Monitored Twitter Accounts</h2>
-        <div className="flex flex-wrap gap-2">
-          {['@zaborhedge', '@GoldTelegraph', '@DeItaone', '@ForexLive', '@financialjuice', '@IGSquawk'].map((acc) => (
-            <span key={acc} className="px-3 py-1 rounded-full bg-white/5 text-sm text-gray-400 border border-white/10">{acc}</span>
-          ))}
-        </div>
-        <p className="text-xs text-gray-600 mt-3">Add more accounts in intelligence/twitter_monitor.py</p>
+        <h2 className="text-lg font-bold mb-2">X / Twitter search (SociaVault)</h2>
+        <p className="text-sm text-gray-500 mb-3">
+          Default query for <span className="text-gray-400">News → Market intel → Fetch new tweets</span>.
+          Stored in this browser only. Backend fallback: <code className="text-neon-cyan">INTEL_DEFAULT_QUERY</code> in{' '}
+          <code className="text-gray-500">.env</code>.
+        </p>
+        <textarea
+          className="w-full min-h-[88px] bg-dark-100 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder:text-gray-600 focus:border-neon-cyan/40 outline-none resize-y"
+          value={intelQuery}
+          onChange={(e) => persistIntel(e.target.value)}
+          placeholder='e.g. gold OR XAUUSD OR DXY OR "us dollar index"'
+        />
       </GlowCard>
 
       <GlowCard>

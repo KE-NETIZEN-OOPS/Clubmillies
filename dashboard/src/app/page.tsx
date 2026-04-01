@@ -8,18 +8,30 @@ import NeonBadge from '@/components/ui/NeonBadge';
 import FloatingButton from '@/components/ui/FloatingButton';
 import { api, DashboardData, LiveSnapshot } from '@/lib/api';
 import { useWebSocket } from '@/lib/websocket';
+import { formatEAT, formatEATTime } from '@/lib/datetime';
+
+const PROFIT_PERIODS = [
+  { value: 'all', label: 'All time' },
+  { value: 'today', label: 'Today' },
+  { value: 'week', label: 'Week' },
+  { value: 'month', label: '1 month' },
+  { value: '3m', label: '3 months' },
+  { value: '6m', label: '6 months' },
+  { value: 'year', label: '1 year' },
+] as const;
 
 export default function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [live, setLive] = useState<LiveSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
+  const [profitPeriod, setProfitPeriod] = useState<string>('all');
   const { events, connected } = useWebSocket();
 
   useEffect(() => {
     loadData();
     const interval = setInterval(loadData, 10000);
     return () => clearInterval(interval);
-  }, []);
+  }, [profitPeriod]);
 
   useEffect(() => {
     let cancelled = false;
@@ -41,7 +53,7 @@ export default function Dashboard() {
 
   async function loadData() {
     try {
-      const d = await api.dashboard();
+      const d = await api.dashboard(profitPeriod);
       setData(d);
     } catch (e) {
       console.error('Dashboard load error:', e);
@@ -49,6 +61,10 @@ export default function Dashboard() {
       setLoading(false);
     }
   }
+
+  const periodLabel = PROFIT_PERIODS.find((p) => p.value === profitPeriod)?.label ?? 'Period';
+  const displayTotalPnl =
+    profitPeriod === 'all' ? data?.total_pnl ?? 0 : data?.period_pnl ?? data?.total_pnl ?? 0;
 
   if (loading) {
     return (
@@ -88,6 +104,24 @@ export default function Dashboard() {
         </div>
       </div>
 
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs text-gray-500">P&amp;L window:</span>
+        {PROFIT_PERIODS.map((p) => (
+          <button
+            key={p.value}
+            type="button"
+            onClick={() => setProfitPeriod(p.value)}
+            className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
+              profitPeriod === p.value
+                ? 'border-neon-cyan/60 bg-neon-cyan/10 text-neon-cyan'
+                : 'border-white/10 bg-white/5 text-gray-400 hover:border-white/20'
+            }`}
+          >
+            {p.label}
+          </button>
+        ))}
+      </div>
+
       {/* Stats Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         <GlowCard animate className="gradient-border">
@@ -115,13 +149,27 @@ export default function Dashboard() {
         </GlowCard>
 
         <GlowCard animate>
-          <p className="text-gray-500 text-sm mb-1">Total P&L</p>
+          <p className="text-gray-500 text-sm mb-1">
+            {profitPeriod === 'all' ? 'Total P&L' : `P&L (${periodLabel})`}
+          </p>
           <AnimatedCounter
-            value={data?.total_pnl || 0}
-            prefix={((data?.total_pnl || 0) >= 0) ? '+$' : '-$'}
-            className={`text-3xl font-bold ${(data?.total_pnl || 0) >= 0 ? 'text-profit' : 'text-loss'}`}
+            value={displayTotalPnl}
+            prefix={(displayTotalPnl >= 0) ? '+$' : '-$'}
+            className={`text-3xl font-bold ${displayTotalPnl >= 0 ? 'text-profit' : 'text-loss'}`}
           />
-          <p className="text-xs text-gray-600 mt-2">All time</p>
+          <p className="text-xs text-gray-600 mt-2">
+            {profitPeriod !== 'all' && data?.total_pnl != null ? (
+              <>All-time: {data.total_pnl >= 0 ? '+' : ''}${data.total_pnl.toFixed(2)} · </>
+            ) : null}
+            {profitPeriod !== 'all' && data?.period_trade_count != null ? (
+              <>{data.period_trade_count} closed in window · </>
+            ) : null}
+            {profitPeriod !== 'all' && data?.period_win_rate != null ? (
+              <>{data.period_win_rate}% win (window)</>
+            ) : (
+              profitPeriod === 'all' && 'All closed trades'
+            )}
+          </p>
         </GlowCard>
       </div>
 
@@ -191,8 +239,10 @@ export default function Dashboard() {
                 ) : (
                   live.open_trades.map((ot) => (
                     <div key={ot.id} className="text-[10px] flex justify-between gap-2">
-                      <span>
-                        #{ot.account_id} {ot.direction} @ {ot.entry_price?.toFixed(2)}
+                      <span className="truncate">
+                        {ot.account_name ?? `Acc ${ot.account_id}`}{' '}
+                        {ot.symbol ? `· ${ot.symbol}` : ''} {ot.direction} @{' '}
+                        {ot.entry_price?.toFixed(2)}
                       </span>
                       <span
                         className={
@@ -212,7 +262,10 @@ export default function Dashboard() {
                 )}
               </div>
               <p className="text-[9px] text-gray-600">
-                Updated {new Date(live.updated_at).toLocaleTimeString()} · est. via Yahoo GC=F
+                Updated {formatEATTime(live.updated_at)} EAT ·{' '}
+                {live.source === 'mt5'
+                  ? 'MT5 positions + live profit'
+                  : 'DB open trades · est. P/L via Yahoo GC=F'}
               </p>
             </GlowCard>
           )}
@@ -220,7 +273,14 @@ export default function Dashboard() {
             {events.length === 0 ? (
               <p className="text-gray-600 text-sm text-center py-8">Waiting for events...</p>
             ) : (
-              events.slice(0, 20).map((ev, i) => (
+              events
+                .filter((ev) => {
+                  if (ev.type !== 'signal.generated') return true;
+                  const sc = (ev.data as { score?: number })?.score ?? 0;
+                  return sc >= 5;
+                })
+                .slice(0, 20)
+                .map((ev, i) => (
                 <motion.div
                   key={i}
                   initial={{ opacity: 0, x: 20 }}
@@ -241,7 +301,7 @@ export default function Dashboard() {
                       {ev.type === 'ai.analysis' && `AI: ${ev.data.direction} (${ev.data.confidence}%)`}
                     </span>
                     <span className="text-gray-600 ml-2">
-                      {new Date(ev.timestamp).toLocaleTimeString()}
+                      {formatEATTime(ev.timestamp)}
                     </span>
                   </div>
                 </motion.div>
@@ -265,7 +325,8 @@ export default function Dashboard() {
                   <th className="text-left py-2">TP</th>
                   <th className="text-left py-2">Score</th>
                   <th className="text-left py-2">Reasons</th>
-                  <th className="text-left py-2">Time</th>
+                  <th className="text-left py-2">R:R</th>
+                  <th className="text-left py-2">Time (EAT)</th>
                 </tr>
               </thead>
               <tbody>
@@ -298,8 +359,11 @@ export default function Dashboard() {
                         ))}
                       </div>
                     </td>
+                    <td className="py-2 font-mono text-xs text-gray-400">
+                      {sig.risk_reward != null ? `1:${sig.risk_reward}` : '—'}
+                    </td>
                     <td className="py-2 text-gray-500 text-xs">
-                      {sig.created_at ? new Date(sig.created_at).toLocaleTimeString() : '-'}
+                      {sig.created_at ? formatEAT(sig.created_at) : '-'}
                     </td>
                   </tr>
                 ))}
