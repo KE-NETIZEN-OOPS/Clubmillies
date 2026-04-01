@@ -242,6 +242,8 @@ export interface IntelFetchResult {
 
 export interface LiveSnapshot {
   spot_xauusd: number | null;
+  /** "mt5" = broker mid tick; "yahoo" = fallback quote */
+  spot_source?: string | null;
   source?: string;
   open_trades: Array<{
     id: number;

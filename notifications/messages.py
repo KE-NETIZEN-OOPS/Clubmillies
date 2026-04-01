@@ -50,7 +50,7 @@ def trade_closed_msg(data: dict) -> str:
         f"📊 {direction} closed\n"
         f"📍 Entry: <code>${data.get('entry', 0):.2f}</code>\n"
         f"📍 Exit: <code>${data.get('exit', 0):.2f}</code>\n"
-        f"{pnl_emoji} P&L: <code>{pnl_str}</code>\n\n"
+        f"{pnl_emoji} P&amp;L: <code>{pnl_str}</code>\n\n"
         f"{extra}\n"
     )
     if emoji_line:

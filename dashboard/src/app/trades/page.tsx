@@ -3,14 +3,34 @@
 import { useEffect, useState } from 'react';
 import GlowCard from '@/components/ui/GlowCard';
 import NeonBadge from '@/components/ui/NeonBadge';
-import { api, TradeData } from '@/lib/api';
+import { api, TradeData, DashboardData } from '@/lib/api';
 import { formatEAT } from '@/lib/datetime';
+import { PROFIT_PERIODS } from '@/lib/profit-periods';
 
 export default function TradesPage() {
   const [trades, setTrades] = useState<TradeData[]>([]);
   const [filter, setFilter] = useState('all');
+  const [dash, setDash] = useState<DashboardData | null>(null);
+  const [profitPeriod, setProfitPeriod] = useState<string>('all');
 
-  useEffect(() => { loadTrades(); }, [filter]);
+  useEffect(() => {
+    loadTrades();
+  }, [filter]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const d = await api.dashboard(profitPeriod);
+        if (!cancelled) setDash(d);
+      } catch (e) {
+        console.error(e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [profitPeriod]);
 
   async function loadTrades() {
     try {
@@ -23,29 +43,67 @@ export default function TradesPage() {
     }
   }
 
-  const totalPnl = trades.reduce((sum, t) => sum + (t.pnl || 0), 0);
-  const wins = trades.filter((t) => (t.pnl || 0) > 0).length;
-  const winRate = trades.length > 0 ? (wins / trades.length * 100) : 0;
+  const periodLabel = PROFIT_PERIODS.find((p) => p.value === profitPeriod)?.label ?? 'Period';
+  const displayWinRate =
+    profitPeriod === 'all' ? dash?.win_rate ?? 0 : dash?.period_win_rate ?? dash?.win_rate ?? 0;
+  const displayPnl =
+    profitPeriod === 'all' ? dash?.total_pnl ?? 0 : dash?.period_pnl ?? 0;
+  const displayClosedCount =
+    profitPeriod === 'all' ? dash?.total_trades ?? 0 : dash?.period_trade_count ?? 0;
 
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-bold">Trade History</h1>
 
-      {/* Quick stats */}
-      <div className="grid grid-cols-3 gap-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs text-gray-500">Stats window (same as dashboard):</span>
+        {PROFIT_PERIODS.map((p) => (
+          <button
+            key={p.value}
+            type="button"
+            onClick={() => setProfitPeriod(p.value)}
+            className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
+              profitPeriod === p.value
+                ? 'border-neon-cyan/60 bg-neon-cyan/10 text-neon-cyan'
+                : 'border-white/10 bg-white/5 text-gray-400 hover:border-white/20'
+            }`}
+          >
+            {p.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Quick stats — from /api/dashboard so win rate & counts match dashboard */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <GlowCard>
-          <p className="text-gray-500 text-xs">Total P&L</p>
-          <p className={`text-2xl font-bold ${totalPnl >= 0 ? 'text-profit' : 'text-loss'}`}>
-            {totalPnl >= 0 ? '+' : ''}${totalPnl.toFixed(2)}
+          <p className="text-gray-500 text-xs">
+            Closed P&amp;L{profitPeriod !== 'all' ? ` (${periodLabel})` : ''}
+          </p>
+          <p className={`text-2xl font-bold ${displayPnl >= 0 ? 'text-profit' : 'text-loss'}`}>
+            {displayPnl >= 0 ? '+' : ''}${displayPnl.toFixed(2)}
+          </p>
+          {profitPeriod !== 'all' && dash?.total_pnl != null ? (
+            <p className="text-[10px] text-gray-600 mt-1">
+              All-time: {dash.total_pnl >= 0 ? '+' : ''}${dash.total_pnl.toFixed(2)}
+            </p>
+          ) : null}
+        </GlowCard>
+        <GlowCard>
+          <p className="text-gray-500 text-xs">
+            Win rate{profitPeriod !== 'all' ? ` (${periodLabel})` : ''}
+          </p>
+          <p className="text-2xl font-bold text-gold">{displayWinRate.toFixed(1)}%</p>
+          <p className="text-[10px] text-gray-600 mt-1">
+            {displayClosedCount} closed in window · dashboard formula
           </p>
         </GlowCard>
         <GlowCard>
-          <p className="text-gray-500 text-xs">Win Rate</p>
-          <p className="text-2xl font-bold text-gold">{winRate.toFixed(1)}%</p>
-        </GlowCard>
-        <GlowCard>
-          <p className="text-gray-500 text-xs">Total Trades</p>
-          <p className="text-2xl font-bold">{trades.length}</p>
+          <p className="text-gray-500 text-xs">Table rows (this view)</p>
+          <p className="text-2xl font-bold">
+            {trades.filter((t) => t.status === 'CLOSED').length}
+            <span className="text-sm text-gray-500 font-normal"> / {trades.length}</span>
+          </p>
+          <p className="text-[10px] text-gray-600 mt-1">Up to 200 rows by last activity</p>
         </GlowCard>
       </div>
 

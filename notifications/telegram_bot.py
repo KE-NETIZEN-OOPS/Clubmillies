@@ -238,7 +238,7 @@ async def cmd_trades(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             select(Trade)
             .where(Trade.status == "CLOSED", Trade.account_id.in_(ids))
             .order_by(Trade.closed_at.desc())
-            .limit(10)
+            .limit(15)
         )
         trades = result.scalars().all()
 
@@ -247,14 +247,17 @@ async def cmd_trades(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     id_to_name = {a.id: a.name for a in accounts}
-    msg = "📋 <b>RECENT CLOSED TRADES</b> <i>(scoped)</i>\n\n"
+    msg = "📋 <b>RECENT CLOSED TRADES</b> <i>(newest first · scoped)</i>\n\n"
     for t in trades:
         emoji = "✅" if (t.pnl or 0) > 0 else "❌"
         pnl_str = f"+${t.pnl:.2f}" if (t.pnl or 0) > 0 else f"-${abs(t.pnl or 0):.2f}"
         who = id_to_name.get(t.account_id, f"#{t.account_id}")
+        reason = (t.close_reason or "—").upper()
+        entry = t.entry_price if t.entry_price is not None else 0.0
+        exit_p = t.exit_price if t.exit_price is not None else 0.0
         msg += (
-            f"{emoji} <b>{who}</b> · {t.direction} | {pnl_str}\n"
-            f"   {t.close_reason} · score {t.confluence_score}/15\n\n"
+            f"{emoji} <b>{who}</b> · {t.direction} · <code>{reason}</code>\n"
+            f"   {pnl_str} · in {entry:.2f} → out {exit_p:.2f} · score {t.confluence_score}/15\n\n"
         )
 
     await update.message.reply_html(msg)

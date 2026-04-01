@@ -9,16 +9,7 @@ import FloatingButton from '@/components/ui/FloatingButton';
 import { api, DashboardData, LiveSnapshot } from '@/lib/api';
 import { useWebSocket } from '@/lib/websocket';
 import { formatEAT, formatEATTime } from '@/lib/datetime';
-
-const PROFIT_PERIODS = [
-  { value: 'all', label: 'All time' },
-  { value: 'today', label: 'Today' },
-  { value: 'week', label: 'Week' },
-  { value: 'month', label: '1 month' },
-  { value: '3m', label: '3 months' },
-  { value: '6m', label: '6 months' },
-  { value: 'year', label: '1 year' },
-] as const;
+import { PROFIT_PERIODS } from '@/lib/profit-periods';
 
 export default function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null);
@@ -65,6 +56,10 @@ export default function Dashboard() {
   const periodLabel = PROFIT_PERIODS.find((p) => p.value === profitPeriod)?.label ?? 'Period';
   const displayTotalPnl =
     profitPeriod === 'all' ? data?.total_pnl ?? 0 : data?.period_pnl ?? data?.total_pnl ?? 0;
+  const displayWinRate =
+    profitPeriod === 'all' ? data?.win_rate ?? 0 : data?.period_win_rate ?? data?.win_rate ?? 0;
+  const displayTradeCount =
+    profitPeriod === 'all' ? data?.total_trades ?? 0 : data?.period_trade_count ?? 0;
 
   if (loading) {
     return (
@@ -143,9 +138,14 @@ export default function Dashboard() {
         </GlowCard>
 
         <GlowCard animate glowColor="rgba(255, 159, 28, 0.3)">
-          <p className="text-gray-500 text-sm mb-1">Win Rate</p>
-          <AnimatedCounter value={data?.win_rate || 0} suffix="%" className="text-3xl font-bold text-gold" />
-          <p className="text-xs text-gray-600 mt-2">{data?.total_trades || 0} total trades</p>
+          <p className="text-gray-500 text-sm mb-1">
+            Win Rate{profitPeriod !== 'all' ? ` (${periodLabel})` : ''}
+          </p>
+          <AnimatedCounter value={displayWinRate} suffix="%" className="text-3xl font-bold text-gold" />
+          <p className="text-xs text-gray-600 mt-2">
+            {displayTradeCount} closed {profitPeriod === 'all' ? 'total' : 'in window'}
+            {profitPeriod === 'all' ? '' : ` · ${data?.total_trades ?? 0} all-time`}
+          </p>
         </GlowCard>
 
         <GlowCard animate>
@@ -216,7 +216,14 @@ export default function Dashboard() {
           {live && (
             <GlowCard className="mb-4 space-y-2">
               <div className="flex justify-between text-xs text-gray-500">
-                <span>Spot XAU/USD (ref.)</span>
+                <span>
+                  Spot XAU/USD
+                  {live.spot_source === 'mt5'
+                    ? ' (MT5 mid)'
+                    : live.spot_source === 'yahoo'
+                      ? ' (Yahoo ref.)'
+                      : ''}
+                </span>
                 <span className="font-mono text-gold">
                   {live.spot_xauusd != null ? `$${live.spot_xauusd.toFixed(2)}` : '—'}
                 </span>

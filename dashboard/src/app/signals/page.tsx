@@ -28,7 +28,7 @@ export default function SignalsPage() {
 
   async function loadSignals() {
     try {
-      setSignals(await api.signals('min_score=5'));
+      setSignals(await api.signals());
     } catch (e) {
       console.error(e);
     }

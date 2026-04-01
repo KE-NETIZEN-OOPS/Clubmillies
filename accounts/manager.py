@@ -4,8 +4,10 @@ Each account runs its own independent trading loop.
 """
 import asyncio
 import logging
+import time
+from collections import defaultdict
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -19,6 +21,15 @@ from core.engine.confluence import ConfluenceEngine, prepare_dataframe
 from core.config import settings
 
 logger = logging.getLogger("clubmillies.accounts")
+
+# Gold: broker digits — match entry/SL/TP vs MT5 history within this (points)
+_MT5_LEVEL_TOL = 0.12
+
+
+def _price_match(a: Optional[float], b: Optional[float], tol: float = _MT5_LEVEL_TOL) -> bool:
+    if a is None or b is None:
+        return False
+    return abs(float(a) - float(b)) <= tol
 
 
 class PaperBroker:
@@ -291,36 +302,195 @@ class MT5LiveBroker:
     def fetch_closed_position_details(
         self, position_ticket: int, opened_at: datetime
     ) -> Optional[dict]:
-        """Profit, exit price, and TP/SL reason from MT5 deal history."""
+        """Profit, exit price, and TP/SL reason from MT5 deal history.
+
+        When a position just disappeared from the terminal, the closing deal may land in the
+        history cache a tick later. We prime a **recent** time window (ending now), then pull
+        deals for the position; retry briefly if empty.
+        """
         if not self.mt5:
             return None
         start = opened_at
         if start.tzinfo is not None:
             start = start.replace(tzinfo=None)
-        day_floor = start - timedelta(days=1)
         t1 = datetime.utcnow()
-        try:
-            self.mt5.history_deals_select(day_floor, t1)
-        except Exception:
-            pass
-        deals = self.mt5.history_deals_get(day_floor, t1, position=position_ticket)
-        if deals is None or len(deals) == 0:
+        day_floor = max(start - timedelta(days=1), t1 - timedelta(days=7))
+
+        def _select_and_get() -> Optional[list]:
+            mt5 = self.mt5
+            # Refresh history around "now" first so the latest close is visible after disappearance
+            try:
+                mt5.history_deals_select(t1 - timedelta(hours=2), t1)
+            except Exception:
+                pass
+            try:
+                mt5.history_deals_select(day_floor, t1)
+            except Exception:
+                pass
+            got = mt5.history_deals_get(day_floor, t1, position=position_ticket)
+            if got is not None and len(got) > 0:
+                return list(got)
             return None
-        total = 0.0
-        exit_deal = deals[-1]
+
+        deals = _select_and_get()
+        if not deals:
+            time.sleep(0.35)
+            t1 = datetime.utcnow()
+            day_floor = max(start - timedelta(days=1), t1 - timedelta(days=7))
+            deals = _select_and_get()
+        if not deals:
+            time.sleep(0.45)
+            t1 = datetime.utcnow()
+            try:
+                self.mt5.history_deals_select(t1 - timedelta(days=1), t1)
+            except Exception:
+                pass
+            got = self.mt5.history_deals_get(t1 - timedelta(days=1), t1, position=position_ticket)
+            deals = list(got) if got else None
+        if not deals:
+            return None
+        deals = sorted(deals, key=lambda d: int(getattr(d, "time", 0)))
+        mt5 = self.mt5
+        entry_out = int(getattr(mt5, "DEAL_ENTRY_OUT", 1))
+        closing = [d for d in deals if int(getattr(d, "entry", -1)) == entry_out]
+        exit_deal = closing[-1] if closing else deals[-1]
         exit_price = float(exit_deal.price)
-        exit_reason = int(exit_deal.reason)
+        exit_reason = int(getattr(exit_deal, "reason", -1))
+        total = 0.0
         for d in deals:
             total += float(d.profit) + float(d.swap) + float(d.commission)
-        tp_code = int(getattr(self.mt5, "DEAL_REASON_TP", 5))
-        sl_code = int(getattr(self.mt5, "DEAL_REASON_SL", 4))
+        # MetaTrader5: DEAL_REASON_SL=4, DEAL_REASON_TP=5 (always use live enums)
+        sl_code = int(getattr(mt5, "DEAL_REASON_SL", 4))
+        tp_code = int(getattr(mt5, "DEAL_REASON_TP", 5))
         if exit_reason == sl_code:
             reason_str = "SL"
         elif exit_reason == tp_code:
             reason_str = "TP"
         else:
             reason_str = "CLIENT"
-        return {"exit_price": exit_price, "pnl": round(total, 2), "close_reason": reason_str}
+        closed_at = datetime.utcfromtimestamp(int(exit_deal.time))
+        return {
+            "exit_price": exit_price,
+            "pnl": round(total, 2),
+            "close_reason": reason_str,
+            "closed_at": closed_at,
+        }
+
+    def get_mid_price(self) -> Optional[float]:
+        """Broker bid/ask mid for charted symbol (matches open P/L context)."""
+        if not self.mt5:
+            return None
+        t = self.mt5.symbol_info_tick(self.symbol)
+        if t is None or not t.bid or not t.ask:
+            return None
+        return round((float(t.bid) + float(t.ask)) / 2.0, 2)
+
+    def _sl_tp_from_orders(self, position_id: int, t0: datetime, t1: datetime) -> tuple[Optional[float], Optional[float]]:
+        """Best-effort SL/TP from history orders for this position id."""
+        if not self.mt5:
+            return None, None
+        try:
+            orders = self.mt5.history_orders_get(t0, t1)
+        except Exception:
+            return None, None
+        if not orders:
+            return None, None
+        for o in orders:
+            op = getattr(o, "position_id", None)
+            if op is None:
+                op = getattr(o, "position", None)
+            if op is not None and int(op) == int(position_id):
+                sl = getattr(o, "sl", None)
+                tp = getattr(o, "tp", None)
+                if sl is not None and tp is not None:
+                    return float(sl), float(tp)
+        return None, None
+
+    def list_closed_round_trips_from_history(self, days: int = 21) -> list[dict[str, Any]]:
+        """
+        Scan MT5 deal history for fully closed round-trips (our magic / ClubMillies comment)
+        on this symbol. Used to backfill DB and verify closes vs terminal.
+        """
+        if not self.mt5:
+            return []
+        mt5 = self.mt5
+        t1 = datetime.utcnow()
+        t0 = t1 - timedelta(days=days)
+        try:
+            mt5.history_deals_select(t0, t1)
+        except Exception:
+            pass
+        raw = mt5.history_deals_get(t0, t1)
+        if not raw:
+            return []
+        entry_in = int(getattr(mt5, "DEAL_ENTRY_IN", 0))
+        entry_out = int(getattr(mt5, "DEAL_ENTRY_OUT", 1))
+        dt_buy = int(getattr(mt5, "DEAL_TYPE_BUY", 0))
+        sl_code = int(getattr(mt5, "DEAL_REASON_SL", 4))
+        tp_code = int(getattr(mt5, "DEAL_REASON_TP", 5))
+        by_pos: dict[int, list] = defaultdict(list)
+        for d in raw:
+            if getattr(d, "symbol", None) != self.symbol:
+                continue
+            magic = int(getattr(d, "magic", 0) or 0)
+            comment = (getattr(d, "comment", None) or "") + ""
+            if magic != 123456 and "ClubMillies" not in comment:
+                continue
+            pid = getattr(d, "position_id", None)
+            if pid is None:
+                pid = getattr(d, "position", None)
+            if pid is None or int(pid) == 0:
+                continue
+            by_pos[int(pid)].append(d)
+
+        out: list[dict[str, Any]] = []
+        for position_id, deals in by_pos.items():
+            deals = sorted(deals, key=lambda x: int(getattr(x, "time", 0)))
+            ins = [d for d in deals if int(getattr(d, "entry", -99)) == entry_in]
+            outs = [d for d in deals if int(getattr(d, "entry", -99)) == entry_out]
+            if not ins or not outs:
+                continue
+            vol_in = sum(float(d.volume) for d in ins)
+            vol_out = sum(float(d.volume) for d in outs)
+            if abs(vol_in - vol_out) > 0.02:
+                continue
+            d_in = ins[0]
+            d_exit = outs[-1]
+            direction = "BUY" if int(getattr(d_in, "type", -1)) == dt_buy else "SELL"
+            entry = float(d_in.price)
+            exit_px = float(d_exit.price)
+            total = 0.0
+            for d in deals:
+                total += float(d.profit) + float(d.swap) + float(d.commission)
+            er = int(getattr(d_exit, "reason", -1))
+            if er == sl_code:
+                reason = "SL"
+            elif er == tp_code:
+                reason = "TP"
+            else:
+                reason = "CLIENT"
+            opened_at = datetime.utcfromtimestamp(int(d_in.time))
+            closed_at = datetime.utcfromtimestamp(int(d_exit.time))
+            sl_o, tp_o = self._sl_tp_from_orders(position_id, t0, t1)
+            sl_f = sl_o if sl_o is not None else float(getattr(d_in, "sl", 0.0) or 0.0)
+            tp_f = tp_o if tp_o is not None else float(getattr(d_in, "tp", 0.0) or 0.0)
+            out.append(
+                {
+                    "position_id": position_id,
+                    "direction": direction,
+                    "entry": round(entry, 5),
+                    "exit": round(exit_px, 5),
+                    "lots": round(vol_in, 2),
+                    "sl": round(sl_f, 5),
+                    "tp": round(tp_f, 5),
+                    "pnl": round(total, 2),
+                    "close_reason": reason,
+                    "opened_at": opened_at,
+                    "closed_at": closed_at,
+                }
+            )
+        out.sort(key=lambda r: r["closed_at"], reverse=True)
+        return out
 
 
 class AccountRunner:
@@ -486,6 +656,7 @@ class AccountRunner:
                         "exit_price": t.tp or t.sl or t.entry_price,
                         "pnl": 0.0,
                         "close_reason": "CLIENT",
+                        "closed_at": None,
                     }
                 await self._save_closed_trade(
                     {
@@ -497,6 +668,7 @@ class AccountRunner:
                         "exit": detail["exit_price"],
                         "pnl": detail["pnl"],
                         "reason": detail["close_reason"],
+                        "closed_at": detail.get("closed_at"),
                     }
                 )
                 continue
@@ -515,6 +687,128 @@ class AccountRunner:
                             .values(mt5_position_ticket=match)
                         )
                         await session.commit()
+
+    async def _align_open_trades_with_terminal(self, account: Account):
+        """Keep DB entry / SL / TP in sync with live MT5 positions (exact broker levels)."""
+        if self.broker_type != "mt5" or not self.broker or not getattr(self.broker, "positions", None):
+            return
+        by_ticket = {int(p["ticket"]): p for p in self.broker.positions}
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(Trade).where(
+                    Trade.account_id == self.account_id,
+                    Trade.status == "OPEN",
+                )
+            )
+            rows = list(result.scalars().all())
+        for t in rows:
+            tid = t.mt5_position_ticket
+            if not tid or int(tid) not in by_ticket:
+                continue
+            p = by_ticket[int(tid)]
+            e, sl, tp = float(p["entry"]), float(p["sl"]), float(p["tp"])
+            if not (
+                _price_match(t.entry_price, e, _MT5_LEVEL_TOL)
+                and _price_match(t.sl, sl, _MT5_LEVEL_TOL)
+                and _price_match(t.tp, tp, _MT5_LEVEL_TOL)
+            ):
+                async with AsyncSessionLocal() as session:
+                    await session.execute(
+                        update(Trade)
+                        .where(Trade.id == t.id)
+                        .values(entry_price=e, sl=sl, tp=tp)
+                    )
+                    await session.commit()
+                logger.info(
+                    f"Aligned OPEN trade {t.id} with MT5 #{tid}: entry={e} sl={sl} tp={tp}"
+                )
+
+    async def _insert_closed_from_history_import(self, r: dict) -> None:
+        """Persist a closed round-trip seen in MT5 history but missing in DB (no Telegram/AI)."""
+        async with AsyncSessionLocal() as session:
+            ex = await session.execute(
+                select(Trade).where(
+                    Trade.account_id == self.account_id,
+                    Trade.mt5_position_ticket == r["position_id"],
+                )
+            )
+            if ex.scalar_one_or_none():
+                return
+            session.add(
+                Trade(
+                    account_id=self.account_id,
+                    direction=r["direction"],
+                    entry_price=r["entry"],
+                    exit_price=r["exit"],
+                    lots=r["lots"],
+                    sl=r["sl"],
+                    tp=r["tp"],
+                    pnl=r["pnl"],
+                    confluence_score=0,
+                    confluence_reasons=[],
+                    status="CLOSED",
+                    close_reason=r["close_reason"],
+                    mt5_position_ticket=r["position_id"],
+                    opened_at=r["opened_at"],
+                    closed_at=r["closed_at"],
+                )
+            )
+            await session.commit()
+
+    async def _reconcile_mt5_history_import(self, account: Account):
+        """
+        Backfill CLOSED rows from MT5 deal history; close dangling OPEN rows when history shows exit.
+        Throttled — full scan is heavier than a single-position fetch.
+        """
+        if self.broker_type != "mt5" or not self.broker or not getattr(self.broker, "mt5", None):
+            return
+        now_m = time.monotonic()
+        if now_m - getattr(self, "_last_mt5_hist_reconcile", 0.0) < 50.0:
+            return
+        self._last_mt5_hist_reconcile = now_m
+
+        rounds = await asyncio.to_thread(self.broker.list_closed_round_trips_from_history, 21)
+        for r in rounds:
+            async with AsyncSessionLocal() as session:
+                ex = await session.execute(
+                    select(Trade).where(
+                        Trade.account_id == self.account_id,
+                        Trade.mt5_position_ticket == r["position_id"],
+                    )
+                )
+                row = ex.scalar_one_or_none()
+            if row and row.status == "CLOSED":
+                continue
+            if row and row.status == "OPEN":
+                if not (
+                    _price_match(row.entry_price, r["entry"])
+                    and _price_match(row.sl, r["sl"])
+                    and _price_match(row.tp, r["tp"])
+                ):
+                    logger.warning(
+                        f"Trade {row.id} MT5 #{r['position_id']}: DB levels differ from history "
+                        f"(DB entry={row.entry_price} sl={row.sl} tp={row.tp} vs "
+                        f"hist entry={r['entry']} sl={r['sl']} tp={r['tp']}) — closing with MT5 history"
+                    )
+                await self._save_closed_trade(
+                    {
+                        "trade_id": row.id,
+                        "mt5_ticket": r["position_id"],
+                        "direction": r["direction"],
+                        "entry": r["entry"],
+                        "lots": r["lots"],
+                        "sl": r["sl"],
+                        "tp": r["tp"],
+                        "exit": r["exit"],
+                        "pnl": r["pnl"],
+                        "reason": r["close_reason"],
+                        "closed_at": r["closed_at"],
+                    },
+                    emit_event=False,
+                    run_post_close_ai=False,
+                )
+                continue
+            await self._insert_closed_from_history_import(r)
 
     async def _on_trade_closed_ai(self, trade_id: int):
         try:
@@ -558,6 +852,8 @@ class AccountRunner:
         self.broker.tick()
         if self.broker_type == "mt5":
             await self._sync_mt5_closed_trades(account)
+            await self._align_open_trades_with_terminal(account)
+            await self._reconcile_mt5_history_import(account)
         df = self.broker.get_candles()
         if df is None or getattr(df, "empty", True) or "close" not in df.columns:
             logger.warning(
@@ -745,7 +1041,13 @@ class AccountRunner:
             session.add(trade)
             await session.commit()
 
-    async def _save_closed_trade(self, ct: dict):
+    async def _save_closed_trade(
+        self,
+        ct: dict,
+        *,
+        emit_event: bool = True,
+        run_post_close_ai: bool = True,
+    ):
         closed_id = None
         emit_direction = ct.get("direction")
         emit_entry = ct.get("entry")
@@ -783,18 +1085,24 @@ class AccountRunner:
                 )
                 trade = result.scalar_one_or_none()
             if trade:
+                if ct.get("entry") is not None:
+                    trade.entry_price = float(ct["entry"])
+                if ct.get("sl") is not None:
+                    trade.sl = float(ct["sl"])
+                if ct.get("tp") is not None:
+                    trade.tp = float(ct["tp"])
                 trade.exit_price = ct["exit"]
                 trade.pnl = ct["pnl"]
                 trade.status = "CLOSED"
                 trade.close_reason = ct["reason"]
-                trade.closed_at = datetime.utcnow()
+                trade.closed_at = ct.get("closed_at") or datetime.utcnow()
                 closed_id = trade.id
                 emit_direction = trade.direction
                 emit_entry = trade.entry_price
                 emit_lots = trade.lots
                 await session.commit()
 
-        if closed_id:
+        if closed_id and emit_event:
             await bus.emit(
                 TRADE_CLOSED,
                 {
@@ -808,6 +1116,7 @@ class AccountRunner:
                     "trade_id": closed_id,
                 },
             )
+        if closed_id and run_post_close_ai:
             asyncio.create_task(self._on_trade_closed_ai(closed_id))
 
     async def _save_signal(self, signal, score, max_score, reasons, price, rsi, atr, sl=None, tp=None):

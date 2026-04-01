@@ -11,7 +11,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPExcept
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from sqlalchemy import select, func, update, desc, delete, or_
+from sqlalchemy import select, func, update, desc, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
@@ -24,9 +24,11 @@ from core.trade_metrics import directional_rr, aggregate_closed_stats
 logger = logging.getLogger("clubmillies.api")
 
 
-def _signal_score_floor() -> int:
-    """Directional signals below this are hidden from UI/API lists (min 5)."""
-    return max(5, int(settings.min_confluence_floor))
+def _signal_list_min_score(requested: Optional[int] = None) -> int:
+    """API lists: only directional signals with score strictly greater than 5 (integer ≥ 6)."""
+    if requested is not None:
+        return max(6, int(requested))
+    return 6
 
 app = FastAPI(title="ClubMillies", version="1.0.0")
 
@@ -146,14 +148,12 @@ async def get_dashboard(
         else:
             period_rows = list(all_trades)
 
-        floor = _signal_score_floor()
+        sig_min = _signal_list_min_score()
         result = await session.execute(
             select(Signal)
             .where(
-                or_(
-                    Signal.signal_type == "HOLD",
-                    Signal.score >= floor,
-                )
+                Signal.signal_type.in_(["BUY", "SELL"]),
+                Signal.score >= sig_min,
             )
             .order_by(desc(Signal.created_at))
             .limit(8)
@@ -513,15 +513,13 @@ async def list_signals(
     limit: int = 50,
     min_score: Optional[int] = None,
 ):
-    floor = _signal_score_floor() if min_score is None else max(5, int(min_score))
+    sig_min = _signal_list_min_score(min_score)
     async with AsyncSessionLocal() as session:
         query = (
             select(Signal)
             .where(
-                or_(
-                    Signal.signal_type == "HOLD",
-                    Signal.score >= floor,
-                )
+                Signal.signal_type.in_(["BUY", "SELL"]),
+                Signal.score >= sig_min,
             )
             .order_by(desc(Signal.created_at))
             .limit(limit)
@@ -625,12 +623,30 @@ async def live_snapshot():
     """Open positions: MT5 terminal profit when engine is running; else DB + Yahoo spot estimate."""
     from intelligence.spot_price import estimate_open_pnl, fetch_xau_usd_spot
 
-    spot = await fetch_xau_usd_spot()
     contract_size = 100.0
     mgr = getattr(app.state, "account_manager", None)
     open_trades = []
     total_unrealized = 0.0
     used_mt5 = False
+    spot: Optional[float] = None
+    spot_source: Optional[str] = None
+
+    # Prefer broker tick mid (same symbol as positions) over Yahoo for displayed spot
+    if mgr and getattr(mgr, "runners", None):
+        for _aid, runner in mgr.runners.items():
+            if runner.broker_type != "mt5" or not runner.broker:
+                continue
+            await asyncio.to_thread(runner.broker.tick)
+            if hasattr(runner.broker, "get_mid_price"):
+                mid = await asyncio.to_thread(runner.broker.get_mid_price)
+                if mid:
+                    spot = float(mid)
+                    spot_source = "mt5"
+                    break
+    if spot is None:
+        spot = await fetch_xau_usd_spot()
+        if spot is not None:
+            spot_source = "yahoo"
 
     if mgr and getattr(mgr, "runners", None):
         async with AsyncSessionLocal() as session:
@@ -704,6 +720,7 @@ async def live_snapshot():
 
     return {
         "spot_xauusd": spot,
+        "spot_source": spot_source,
         "open_trades": open_trades,
         "total_unrealized_pnl": round(total_unrealized, 2),
         "updated_at": datetime.utcnow().isoformat(),

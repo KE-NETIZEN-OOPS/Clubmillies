@@ -89,12 +89,8 @@ export default function SettingsPage() {
       </GlowCard>
 
       <GlowCard>
-        <h2 className="text-lg font-bold mb-2">X / Twitter search (SociaVault)</h2>
-        <p className="text-sm text-gray-500 mb-3">
-          Default query for <span className="text-gray-400">News → Market intel → Fetch new tweets</span>.
-          Stored in this browser only. Backend fallback: <code className="text-neon-cyan">INTEL_DEFAULT_QUERY</code> in{' '}
-          <code className="text-gray-500">.env</code>.
-        </p>
+        <h2 className="text-lg font-bold mb-2">Market intel query</h2>
+        <p className="text-sm text-gray-500 mb-3">Saved in this browser for the News page intel fetch.</p>
         <textarea
           className="w-full min-h-[88px] bg-dark-100 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder:text-gray-600 focus:border-neon-cyan/40 outline-none resize-y"
           value={intelQuery}

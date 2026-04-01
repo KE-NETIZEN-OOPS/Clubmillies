@@ -67,8 +67,8 @@ export default function NewsPage() {
     try {
       const r = await api.fetchIntelTweets(intelQuery.trim() || undefined);
       setIntelLast(
-        `Found ${r.tweets_found} posts (${r.tweets_new_rows} new in DB). ` +
-          `${r.sociavault_requests} SociaVault request · AI: ${r.analysis.direction} (${r.analysis.confidence}%)`
+        `Found ${r.tweets_found} posts (${r.tweets_new_rows} new). ` +
+          `AI: ${r.analysis.direction} (${r.analysis.confidence}%)`
       );
       const [tList, aList] = await Promise.all([
         api.tweets(),
@@ -124,10 +124,7 @@ export default function NewsPage() {
       <div>
         <h1 className="text-2xl font-bold">News & AI Analysis</h1>
         <p className="text-sm text-gray-500 mt-1 max-w-3xl">
-          AI cards show <span className="text-gray-400">direction + confidence bars</span> because each
-          run is scored for bullish / bearish bias. Performance summaries include a JSON metrics block
-          for ROI — that is intentional for transparency. Economic events use a public calendar JSON
-          (not ForexFactory HTML) to avoid 403 blocks. This page refreshes every 45s while open.
+          AI runs, economic calendar, and intel refresh while this page is open.
         </p>
       </div>
 
@@ -275,19 +272,12 @@ export default function NewsPage() {
           </GlowCard>
         </div>
 
-        {/* Intel (tweets + news headlines) */}
+        {/* Intel — optional manual fetch when backend intel API is configured */}
         <div className="xl:col-span-3 min-w-0">
           <h2 className="text-lg font-bold text-gray-300 mb-4">Market intel</h2>
-          <p className="text-xs text-gray-600 mb-3">
-            Google News + account RSS still fill in the background.{' '}
-            <span className="text-gold">X search via SociaVault is manual only</span> (one API credit per
-            button click). Set <code className="text-gray-400">SOCIAVAULT_API_KEY</code> and optional{' '}
-            <code className="text-gray-400">INTEL_DEFAULT_QUERY</code> in the backend{' '}
-            <code className="text-gray-400">.env</code>.
-          </p>
           <div className="mb-3 space-y-2">
-            <label className="text-xs text-gray-500 block">X / Twitter search query (one request per fetch)</label>
             <textarea
+              aria-label="Intel search keywords"
               className="w-full min-h-[72px] bg-dark-100 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder:text-gray-600 focus:border-neon-cyan/40 outline-none resize-y"
               value={intelQuery}
               onChange={(e) => {
@@ -309,12 +299,10 @@ export default function NewsPage() {
               className="w-full py-2.5 rounded-xl font-medium text-sm bg-neon-cyan/20 text-neon-cyan border border-neon-cyan/40 hover:shadow-glow disabled:opacity-40 disabled:cursor-not-allowed transition-all"
               whileTap={{ scale: intelReady && !intelLoading ? 0.98 : 1 }}
             >
-              {intelLoading ? 'Fetching…' : 'Fetch new tweets'}
+              {intelLoading ? 'Fetching…' : 'Fetch intel'}
             </motion.button>
             {!intelReady && (
-              <p className="text-xs text-loss">
-                SociaVault is not configured (add SOCIAVAULT_API_KEY to the API server .env and restart).
-              </p>
+              <p className="text-xs text-gray-500">Manual intel fetch is not available (API not configured).</p>
             )}
             {intelError && <p className="text-xs text-loss whitespace-pre-wrap">{intelError}</p>}
             {intelLast && !intelError && (
@@ -323,9 +311,7 @@ export default function NewsPage() {
           </div>
           <GlowCard>
             {tweets.length === 0 ? (
-              <p className="text-gray-600 text-center py-4">
-                No items yet. Add Google News queries or fix Twitter API / RSS bridges.
-              </p>
+              <p className="text-gray-600 text-center py-4">No intel items yet — use Fetch when configured.</p>
             ) : (
               <div className="space-y-3 max-h-[70vh] overflow-y-auto">
                 {tweets.map((t) => (
