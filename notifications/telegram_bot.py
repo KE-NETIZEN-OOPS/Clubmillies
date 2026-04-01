@@ -12,6 +12,7 @@ from typing import List, Optional
 
 from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.request import HTTPXRequest
 from sqlalchemy import select, func, update
 
 from core.config import settings
@@ -27,6 +28,7 @@ from notifications.messages import (
 logger = logging.getLogger("clubmillies.telegram")
 
 app: Application = None
+_broadcast_no_chats_logged = False
 
 
 def _dashboard_url() -> str:
@@ -105,10 +107,21 @@ def _account_label(acc: Account) -> str:
 async def _broadcast(text: str):
     """Send message to all subscribed chats."""
     if not app:
+        logger.warning("Telegram broadcast skipped: bot application not initialized (no token or setup failed)")
         return
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(TelegramChat).where(TelegramChat.subscribed == True))
         chats = result.scalars().all()
+
+    if not chats:
+        global _broadcast_no_chats_logged
+        if not _broadcast_no_chats_logged:
+            _broadcast_no_chats_logged = True
+            logger.warning(
+                "Telegram broadcast skipped: no subscribed chats. "
+                "Message /start to the bot from your account or set TELEGRAM_CHAT_ID in .env."
+            )
+        return
 
     for chat in chats:
         try:
@@ -368,7 +381,14 @@ async def setup_telegram():
         logger.warning("No TELEGRAM_BOT_TOKEN set — Telegram bot disabled")
         return
 
-    app = Application.builder().token(token).build()
+    # Longer timeouts than PTB defaults (often ~5s) — avoid spurious timeouts to api.telegram.org.
+    request = HTTPXRequest(
+        connect_timeout=20.0,
+        read_timeout=45.0,
+        write_timeout=45.0,
+        pool_timeout=10.0,
+    )
+    app = Application.builder().token(token).request(request).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("status", cmd_status))
