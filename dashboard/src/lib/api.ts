@@ -64,7 +64,8 @@ export const api = {
       !params ? '' : params.startsWith('?') ? params : `?${params}`;
     return fetchApi<AnalysisData[]>(`/api/ai-analyses${q}`);
   },
-  tweets: () => fetchApi<TweetData[]>('/api/tweets'),
+  tweets: (params?: string) =>
+    fetchApi<TweetData[]>(`/api/tweets${params ? '?' + params : ''}`),
   stats: () => fetchApi<StatsData>('/api/stats'),
   intelConfig: () =>
     fetchApi<IntelConfig>('/api/intel/config'),

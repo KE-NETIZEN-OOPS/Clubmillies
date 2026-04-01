@@ -5,7 +5,7 @@ import Link from 'next/link';
 import GlowCard from '@/components/ui/GlowCard';
 import NeonBadge from '@/components/ui/NeonBadge';
 import { api, IntelSummaryData, TweetData } from '@/lib/api';
-import { xPostUrl, INTEL_DIR_SHORT } from '@/lib/intel';
+import { xPostUrl, INTEL_DIR_SHORT, computeIntelSummaryFromTweets } from '@/lib/intel';
 import { formatEAT } from '@/lib/datetime';
 import { motion } from 'framer-motion';
 
@@ -39,6 +39,7 @@ function CountPill({
 export default function IntelPage() {
   const [summary, setSummary] = useState<IntelSummaryData | null>(null);
   const [summaryErr, setSummaryErr] = useState<string | null>(null);
+  const [summaryNotice, setSummaryNotice] = useState<string | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(true);
 
   const [intelQuery, setIntelQuery] = useState('');
@@ -144,6 +145,11 @@ export default function IntelPage() {
       ) : null}
       {summaryErr ? (
         <p className="text-sm text-loss whitespace-pre-wrap">{summaryErr}</p>
+      ) : null}
+      {summaryNotice && !summaryErr ? (
+        <p className="text-xs text-gold/90 border border-gold/25 rounded-lg px-3 py-2 bg-gold/5 whitespace-pre-wrap">
+          {summaryNotice}
+        </p>
       ) : null}
 
       {summary ? (
