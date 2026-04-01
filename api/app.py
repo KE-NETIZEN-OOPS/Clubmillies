@@ -459,14 +459,33 @@ async def toggle_account(account_id: int):
 
 # ── Trades ───────────────────────────────────────────────────────────
 
+def _analysis_is_garbage_row(a) -> bool:
+    """Hide rows saved when the API server was misconfigured (e.g. missing anthropic)."""
+    r = (getattr(a, "reasoning", None) or "") + ""
+    low = r.lower()
+    return "no module named" in low and "anthropic" in low
+
+
 @app.get("/api/trades")
-async def list_trades(status: str = None, account_id: int = None, limit: int = 50):
+async def list_trades(status: str = None, account_id: int = None, limit: int = 200):
+    """
+    Recent activity first: uses last activity time (close time if closed, else open time).
+    Avoids hiding closed trades behind a long run of open positions (old bug: sort by opened_at only).
+    """
     async with AsyncSessionLocal() as session:
-        query = select(Trade).order_by(desc(Trade.opened_at)).limit(limit)
-        if status:
-            query = query.where(Trade.status == status)
+        last_activity = func.coalesce(Trade.closed_at, Trade.opened_at)
+        query = select(Trade)
         if account_id:
             query = query.where(Trade.account_id == account_id)
+        if status:
+            query = query.where(Trade.status == status)
+            if status.upper() == "CLOSED":
+                query = query.order_by(desc(Trade.closed_at))
+            else:
+                query = query.order_by(desc(Trade.opened_at))
+        else:
+            query = query.order_by(desc(last_activity))
+        query = query.limit(limit)
         result = await session.execute(query)
         trades = result.scalars().all()
 
@@ -761,11 +780,16 @@ async def analyze_news_item(news_id: int):
 @app.get("/api/ai-analyses")
 async def list_analyses(limit: int = 20, account_id: Optional[int] = None):
     async with AsyncSessionLocal() as session:
-        query = select(AIAnalysis).order_by(desc(AIAnalysis.created_at)).limit(limit)
+        query = (
+            select(AIAnalysis)
+            .order_by(desc(AIAnalysis.created_at))
+            .limit(max(limit * 4, 40))
+        )
         if account_id is not None:
             query = query.where(AIAnalysis.account_id == account_id)
         result = await session.execute(query)
-        analyses = result.scalars().all()
+        raw = result.scalars().all()
+        analyses = [a for a in raw if not _analysis_is_garbage_row(a)][:limit]
 
     return [
         {

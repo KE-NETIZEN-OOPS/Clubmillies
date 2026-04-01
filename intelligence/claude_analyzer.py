@@ -23,10 +23,19 @@ class ClaudeAnalyzer:
         self.api_key = api_key or settings.anthropic_api_key
         self.enabled = bool(self.api_key)
         self._client = None
+        if self.enabled:
+            try:
+                import anthropic  # noqa: F401
+            except ImportError:
+                logger.error(
+                    "anthropic package not installed — pip install anthropic (required on the API server)"
+                )
+                self.enabled = False
 
     def _get_client(self):
         if self._client is None and self.enabled:
             import anthropic
+
             self._client = anthropic.Anthropic(api_key=self.api_key)
         return self._client
 
@@ -79,7 +88,14 @@ class ClaudeAnalyzer:
 
         except Exception as e:
             logger.error(f"Claude API error: {e}")
-            return {"direction": "neutral", "confidence": 0, "reasoning": str(e)}
+            err = str(e)
+            # Never persist raw infra errors as if they were analysis (was showing on dashboard).
+            return {
+                "direction": "neutral",
+                "confidence": 0,
+                "reasoning": err,
+                "_skip_persist": True,
+            }
 
     async def analyze_news(self, event: dict) -> dict:
         """Analyze a news event's impact on gold."""
@@ -100,6 +116,8 @@ class ClaudeAnalyzer:
         )
 
         result = await self._call_claude(system, prompt)
+        if result.pop("_skip_persist", False):
+            return result
         await self._save_analysis("news", str(event), result)
         return result
 
@@ -149,6 +167,8 @@ class ClaudeAnalyzer:
         )
 
         result = await self._call_claude(system, prompt, max_tokens=1400)
+        if result.pop("_skip_persist", False):
+            return result
         metrics = {
             "search_query": search_query,
             "tweet_count": len(tweets),
@@ -189,6 +209,8 @@ class ClaudeAnalyzer:
         )
 
         result = await self._call_claude(system, prompt)
+        if result.pop("_skip_persist", False):
+            return result
         await self._save_analysis("market", prompt[:500], result)
         return result
 
@@ -228,6 +250,8 @@ class ClaudeAnalyzer:
             + "\n".join(cal_lines)
         )
         result = await self._call_claude(system, prompt, max_tokens=900)
+        if result.pop("_skip_persist", False):
+            return result
         v = result.get("verdict")
         rs = result.get("reasoning") or ""
         if v and isinstance(rs, str) and str(v) not in rs:
@@ -353,6 +377,15 @@ class ClaudeAnalyzer:
         )
         prompt = summary + f"\n\nFull metrics JSON:\n{json.dumps(metrics)}"
         result = await self._call_claude(system, prompt)
+        if result.pop("_skip_persist", False):
+            result = {
+                "direction": "neutral",
+                "confidence": 0,
+                "reasoning": (
+                    "Commentary unavailable — ensure the API server has `anthropic` installed "
+                    "(`pip install anthropic`) and ANTHROPIC_API_KEY set. Metrics are still logged."
+                ),
+            }
         await self._save_analysis(
             "trade_close",
             summary,

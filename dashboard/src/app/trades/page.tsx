@@ -14,9 +14,13 @@ export default function TradesPage() {
 
   async function loadTrades() {
     try {
-      const params = filter !== 'all' ? `status=${filter.toUpperCase()}` : '';
-      setTrades(await api.trades(params));
-    } catch (e) { console.error(e); }
+      const q = new URLSearchParams();
+      q.set('limit', '200');
+      if (filter !== 'all') q.set('status', filter.toUpperCase());
+      setTrades(await api.trades(q.toString()));
+    } catch (e) {
+      console.error(e);
+    }
   }
 
   const totalPnl = trades.reduce((sum, t) => sum + (t.pnl || 0), 0);
@@ -75,6 +79,7 @@ export default function TradesPage() {
                 <th className="text-left py-3 px-2">Reason</th>
                 <th className="text-left py-3 px-2">Status</th>
                 <th className="text-left py-3 px-2">Opened (EAT)</th>
+                <th className="text-left py-3 px-2">Closed (EAT)</th>
               </tr>
             </thead>
             <tbody>
@@ -97,10 +102,13 @@ export default function TradesPage() {
                   <td className="py-2 px-2 text-gray-500 text-xs">
                     {t.opened_at ? formatEAT(t.opened_at) : '-'}
                   </td>
+                  <td className="py-2 px-2 text-gray-500 text-xs">
+                    {t.closed_at ? formatEAT(t.closed_at) : '—'}
+                  </td>
                 </tr>
               ))}
               {trades.length === 0 && (
-                <tr><td colSpan={9} className="text-center py-8 text-gray-600">No trades yet</td></tr>
+                <tr><td colSpan={10} className="text-center py-8 text-gray-600">No trades yet</td></tr>
               )}
             </tbody>
           </table>

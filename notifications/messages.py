@@ -137,14 +137,16 @@ def ai_analysis_msg(data: dict) -> str:
 
 
 def daily_report_msg(stats: dict) -> str:
+    tp = stats.get("today_pnl", stats.get("pnl", 0))
+    ap = stats.get("all_time_pnl", 0)
     return (
-        f"📊 <b>DAILY REPORT — ClubMillies</b>\n\n"
-        f"💰 Balance: <code>${stats.get('balance', 0):,.2f}</code>\n"
-        f"📈 Today P&L: <code>{'+' if stats.get('pnl', 0) >= 0 else ''}"
-        f"${stats.get('pnl', 0):,.2f}</code>\n"
-        f"🎯 Trades: <code>{stats.get('trades', 0)}</code>\n"
-        f"✅ Win Rate: <code>{stats.get('win_rate', 0):.1f}%</code>\n"
-        f"📊 Open Positions: <code>{stats.get('open_positions', 0)}</code>\n\n"
+        f"📊 <b>PERFORMANCE — ClubMillies</b>\n\n"
+        f"💰 Active accounts balance (sum): <code>${stats.get('balance', 0):,.2f}</code>\n"
+        f"📈 Today P&L (closed, EAT day): <code>{'+' if tp >= 0 else ''}${tp:,.2f}</code>\n"
+        f"🏛 All-time realized P&L: <code>{'+' if ap >= 0 else ''}${ap:,.2f}</code>\n"
+        f"🎯 Closed trades today: <code>{stats.get('trades', 0)}</code>\n"
+        f"✅ Today win rate: <code>{stats.get('win_rate', 0):.1f}%</code>\n"
+        f"📊 Open positions (DB): <code>{stats.get('open_positions', 0)}</code>\n\n"
         f"💪 {random.choice(DAILY_MESSAGES)}"
     )
 

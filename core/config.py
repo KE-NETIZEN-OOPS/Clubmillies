@@ -39,6 +39,8 @@ class Settings:
     api_secret_key: str = "change-me"
     host: str = "0.0.0.0"
     port: int = 8000
+    # Telegram / links (production dashboard URL, not localhost)
+    dashboard_public_url: str = "https://clubmillies.vercel.app"
 
     # Database
     db_url: str = f"sqlite+aiosqlite:///{DB_PATH}"
@@ -89,6 +91,9 @@ class Settings:
             host=os.getenv("HOST", "0.0.0.0"),
             port=int(os.getenv("PORT", "8000")),
             min_confluence_floor=int(os.getenv("MIN_CONFLUENCE_FLOOR", "5")),
+            dashboard_public_url=os.getenv(
+                "DASHBOARD_PUBLIC_URL", "https://clubmillies.vercel.app"
+            ).rstrip("/"),
         )
 
 

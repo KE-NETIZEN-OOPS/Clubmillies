@@ -1,5 +1,6 @@
 """
 Best-effort XAU/USD spot for dashboard live P/L estimates (no API key).
+Prefers forex pair XAUUSD=X; falls back to gold futures GC=F.
 """
 from __future__ import annotations
 
@@ -10,10 +11,11 @@ import httpx
 
 logger = logging.getLogger("clubmillies.spot")
 
+_YAHUAU = "https://query1.finance.yahoo.com/v8/finance/chart/XAUUSD=X?interval=1m&range=1d"
+_YAHGC = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=1m&range=1d"
 
-async def fetch_xau_usd_spot() -> Optional[float]:
-    """Yahoo Finance chart API for GC=F (gold futures ~ spot)."""
-    url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=1m&range=1d"
+
+async def _yahoo_last_price(url: str) -> Optional[float]:
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ClubMillies/1.0",
         "Accept": "application/json",
@@ -31,8 +33,17 @@ async def fetch_xau_usd_spot() -> Optional[float]:
             price = meta.get("regularMarketPrice") or meta.get("previousClose")
             return float(price) if price is not None else None
     except Exception as e:
-        logger.debug(f"Spot price fetch failed: {e}")
+        logger.debug(f"Yahoo chart fetch failed ({url}): {e}")
         return None
+
+
+async def fetch_xau_usd_spot() -> Optional[float]:
+    """Spot XAU/USD: try forex pair first, then COMEX gold futures."""
+    p = await _yahoo_last_price(_YAHUAU)
+    if p is not None and p > 0:
+        return p
+    p = await _yahoo_last_price(_YAHGC)
+    return p
 
 
 def estimate_open_pnl(

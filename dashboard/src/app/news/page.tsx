@@ -29,10 +29,12 @@ export default function NewsPage() {
   const [analyzingId, setAnalyzingId] = useState<number | null>(null);
   const [analyzeErr, setAnalyzeErr] = useState<string | null>(null);
 
+  function isGarbageAnalysis(a: AnalysisData): boolean {
+    const r = (a.reasoning || '').toLowerCase();
+    return r.includes('no module named') && r.includes('anthropic');
+  }
+
   useEffect(() => {
-    api.news().then(setNews).catch(console.error);
-    api.analyses('limit=40').then(setAnalyses).catch(console.error);
-    api.tweets().then(setTweets).catch(console.error);
     let saved = '';
     try {
       saved = localStorage.getItem(INTEL_KEY) || '';
@@ -46,6 +48,17 @@ export default function NewsPage() {
         setIntelReady(c.sociavault_configured);
       })
       .catch(console.error);
+  }, []);
+
+  useEffect(() => {
+    function refresh() {
+      api.news().then(setNews).catch(console.error);
+      api.analyses('limit=40').then(setAnalyses).catch(console.error);
+      api.tweets().then(setTweets).catch(console.error);
+    }
+    refresh();
+    const t = setInterval(refresh, 45_000);
+    return () => clearInterval(t);
   }, []);
 
   async function handleFetchIntel() {
@@ -73,9 +86,16 @@ export default function NewsPage() {
   const grouped = useMemo(() => {
     const g: Record<string, AnalysisData[]> = {};
     for (const a of analyses) {
+      if (isGarbageAnalysis(a)) continue;
       const k = a.source || 'other';
       if (!g[k]) g[k] = [];
       g[k].push(a);
+    }
+    for (const k of Object.keys(g)) {
+      g[k].sort(
+        (a, b) =>
+          new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+      );
     }
     return g;
   }, [analyses]);
@@ -107,42 +127,50 @@ export default function NewsPage() {
           AI cards show <span className="text-gray-400">direction + confidence bars</span> because each
           run is scored for bullish / bearish bias. Performance summaries include a JSON metrics block
           for ROI — that is intentional for transparency. Economic events use a public calendar JSON
-          (not ForexFactory HTML) to avoid 403 blocks.
+          (not ForexFactory HTML) to avoid 403 blocks. This page refreshes every 45s while open.
         </p>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* AI Analyses — grouped by source */}
-        <div>
-          <h2 className="text-lg font-bold text-gray-300 mb-4">AI Analysis (Claude)</h2>
-          <div className="space-y-6">
-            {analyses.length === 0 ? (
-              <GlowCard>
-                <p className="text-gray-600 text-center py-4">
-                  No AI analyses yet. Set <code className="text-neon-cyan">ANTHROPIC_API_KEY</code> in
-                  .env
-                </p>
-              </GlowCard>
+      <div className="grid grid-cols-1 xl:grid-cols-12 gap-4 items-start">
+        {/* AI Analyses — scrollable compact list */}
+        <div className="xl:col-span-5 min-w-0">
+          <div className="flex items-center justify-between mb-2 gap-2">
+            <h2 className="text-lg font-bold text-gray-300">AI Analysis (Claude)</h2>
+            <button
+              type="button"
+              onClick={() => api.analyses('limit=40').then(setAnalyses).catch(console.error)}
+              className="text-xs px-2 py-1 rounded-lg border border-white/10 text-gray-400 hover:text-white"
+            >
+              Refresh
+            </button>
+          </div>
+          <div className="max-h-[min(68vh,560px)] overflow-y-auto rounded-xl border border-white/10 bg-dark-100/40 pr-1">
+            {analyses.filter((a) => !isGarbageAnalysis(a)).length === 0 ? (
+              <div className="p-4 text-center text-gray-600 text-sm">
+                No AI analyses yet. Set <code className="text-neon-cyan">ANTHROPIC_API_KEY</code> on the{' '}
+                <strong>API server</strong> and <code className="text-gray-500">pip install anthropic</code>.
+              </div>
             ) : (
-              keysToShow.map((key) => (
-                  <div key={key}>
-                    <h3 className="text-xs font-semibold text-gold mb-2 uppercase tracking-wider">
+              <div className="space-y-2 p-2">
+                {keysToShow.map((key) => (
+                  <div key={key} className="mb-4 last:mb-0">
+                    <h3 className="text-[10px] font-semibold text-gold mb-1.5 uppercase tracking-wider px-1">
                       {SOURCE_LABEL[key] || key}
                     </h3>
-                    <div className="space-y-3">
+                    <div className="space-y-2">
                       {grouped[key].map((a) => (
-                        <GlowCard
+                        <div
                           key={a.id}
-                          glowColor={
+                          className={`rounded-lg border p-3 text-left ${
                             a.direction === 'bullish'
-                              ? 'rgba(0,230,118,0.2)'
+                              ? 'border-profit/25 bg-profit/5'
                               : a.direction === 'bearish'
-                                ? 'rgba(255,51,102,0.2)'
-                                : 'rgba(100,100,100,0.1)'
-                          }
+                                ? 'border-loss/25 bg-loss/5'
+                                : 'border-white/10 bg-white/[0.03]'
+                          }`}
                         >
-                          <div className="flex items-center justify-between mb-2">
-                            <NeonBadge label={(a.source || 'ai').toUpperCase()} variant="neutral" />
+                          <div className="flex items-center justify-between gap-2 mb-1.5">
+                            <span className="text-[10px] text-gray-500 uppercase">{a.source}</span>
                             <NeonBadge
                               label={a.direction.toUpperCase()}
                               variant={
@@ -154,47 +182,44 @@ export default function NewsPage() {
                               }
                             />
                           </div>
-                          <div className="mb-2">
-                            <div className="flex items-center gap-2 mb-1">
-                              <span className="text-xs text-gray-500">Confidence</span>
-                              <div className="flex-1 h-2 bg-dark-100 rounded-full overflow-hidden">
-                                <div
-                                  className={`h-full rounded-full ${
-                                    a.confidence >= 70
-                                      ? 'bg-profit'
-                                      : a.confidence >= 40
-                                        ? 'bg-gold'
-                                        : 'bg-loss'
-                                  }`}
-                                  style={{ width: `${Math.min(100, a.confidence)}%` }}
-                                />
-                              </div>
-                              <span className="text-xs font-bold">{a.confidence}%</span>
+                          <div className="flex items-center gap-2 mb-1.5">
+                            <span className="text-[10px] text-gray-500 shrink-0">Confidence</span>
+                            <div className="flex-1 h-1.5 bg-dark-100 rounded-full overflow-hidden min-w-0">
+                              <div
+                                className={`h-full rounded-full ${
+                                  a.confidence >= 70
+                                    ? 'bg-profit'
+                                    : a.confidence >= 40
+                                      ? 'bg-gold'
+                                      : 'bg-loss'
+                                }`}
+                                style={{ width: `${Math.min(100, a.confidence)}%` }}
+                              />
                             </div>
+                            <span className="text-[10px] font-bold tabular-nums">{a.confidence}%</span>
                           </div>
-                          <p className="text-sm text-gray-300 leading-relaxed">{a.reasoning}</p>
+                          <p className="text-xs text-gray-300 leading-snug line-clamp-6">{a.reasoning}</p>
                           {a.metrics && (
-                            <details className="mt-2 text-[10px] text-gray-600">
-                              <summary className="cursor-pointer text-gray-500">Metrics JSON</summary>
-                              <pre className="mt-1 p-2 rounded bg-black/40 overflow-x-auto whitespace-pre-wrap">
+                            <details className="mt-1.5 text-[10px] text-gray-600">
+                              <summary className="cursor-pointer text-gray-500">Metrics</summary>
+                              <pre className="mt-1 p-2 rounded bg-black/40 overflow-x-auto whitespace-pre-wrap max-h-32 overflow-y-auto">
                                 {JSON.stringify(a.metrics, null, 2)}
                               </pre>
                             </details>
                           )}
-                          <p className="text-[10px] text-gray-600 mt-2">
-                            {formatEAT(a.created_at)} EAT
-                          </p>
-                        </GlowCard>
+                          <p className="text-[10px] text-gray-600 mt-1.5">{formatEAT(a.created_at)} EAT</p>
+                        </div>
                       ))}
                     </div>
                   </div>
-                ))
+                ))}
+              </div>
             )}
           </div>
         </div>
 
         {/* Economic Calendar */}
-        <div>
+        <div className="xl:col-span-4 min-w-0">
           <h2 className="text-lg font-bold text-gray-300 mb-4">Economic Calendar</h2>
           {analyzeErr && (
             <p className="text-xs text-loss mb-2 whitespace-pre-wrap">{analyzeErr}</p>
@@ -251,7 +276,7 @@ export default function NewsPage() {
         </div>
 
         {/* Intel (tweets + news headlines) */}
-        <div>
+        <div className="xl:col-span-3 min-w-0">
           <h2 className="text-lg font-bold text-gray-300 mb-4">Market intel</h2>
           <p className="text-xs text-gray-600 mb-3">
             Google News + account RSS still fill in the background.{' '}

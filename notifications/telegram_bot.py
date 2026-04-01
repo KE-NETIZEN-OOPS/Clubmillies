@@ -3,15 +3,15 @@ ClubMillies — Telegram Bot for trade alerts and management.
 """
 import logging
 import os
-from datetime import datetime
 from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, ContextTypes
 from sqlalchemy import select, func
 
 from core.config import settings
 from core.database import AsyncSessionLocal
-from core.models import Account, Trade, Signal, TelegramChat
+from core.models import Account, Trade, TelegramChat
 from core.events import bus, TRADE_OPENED, TRADE_CLOSED, SIGNAL_GENERATED, NEWS_EVENT, AI_ANALYSIS
+from core.datetime_eat import period_start_utc_naive
 from notifications.messages import (
     trade_opened_msg, trade_closed_msg, signal_msg,
     news_alert_msg, ai_analysis_msg, daily_report_msg,
@@ -20,6 +20,10 @@ from notifications.messages import (
 logger = logging.getLogger("clubmillies.telegram")
 
 app: Application = None
+
+
+def _dashboard_url() -> str:
+    return (settings.dashboard_public_url or "https://clubmillies.vercel.app").rstrip("/")
 
 
 async def _broadcast(text: str):
@@ -86,16 +90,18 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             session.add(TelegramChat(chat_id=chat_id, username=username))
             await session.commit()
 
+    dash = _dashboard_url()
     await update.message.reply_html(
         "👑 <b>Welcome to ClubMillies</b>\n\n"
         "<i>Not the best you can get but the best there is</i>\n\n"
         "You're now subscribed to trade alerts! 🔔\n\n"
         "Commands:\n"
-        "/status — Account overview\n"
-        "/trades — Recent trades\n"
-        "/accounts — All accounts\n"
-        "/report — Performance report\n"
-        "/help — All commands"
+        "/status — Active accounts & balances\n"
+        "/trades — Recent closed trades\n"
+        "/accounts — Active accounts only\n"
+        "/report — Today + all-time P&amp;L (EAT)\n"
+        "/help — All commands\n\n"
+        f"🌐 Dashboard: <a href=\"{dash}\">{dash}</a>"
     )
 
 
@@ -108,18 +114,17 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No active accounts. Add one via the dashboard.")
         return
 
-    msg = "📊 <b>ACCOUNT STATUS</b>\n\n"
+    msg = "📊 <b>ACTIVE ACCOUNTS</b>\n\n"
     total_balance = 0
     for acc in accounts:
-        status = "🟢" if acc.enabled else "🔴"
         msg += (
-            f"{status} <b>{acc.name}</b>\n"
+            f"🟢 <b>{acc.name}</b>\n"
             f"   💰 ${acc.balance:,.2f} | 📈 ${acc.equity:,.2f}\n"
             f"   🎯 {acc.profile} | 💱 {acc.symbol}\n\n"
         )
         total_balance += acc.balance
 
-    msg += f"━━━━━━━━━━━━━━━━━━\n💰 Total: <b>${total_balance:,.2f}</b>"
+    msg += f"━━━━━━━━━━━━━━━━━━\n💰 Total balance: <b>${total_balance:,.2f}</b>"
     await update.message.reply_html(msg)
 
 
@@ -135,7 +140,7 @@ async def cmd_trades(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No closed trades yet.")
         return
 
-    msg = "📋 <b>RECENT TRADES</b>\n\n"
+    msg = "📋 <b>RECENT CLOSED TRADES</b>\n\n"
     for t in trades:
         emoji = "✅" if (t.pnl or 0) > 0 else "❌"
         pnl_str = f"+${t.pnl:.2f}" if (t.pnl or 0) > 0 else f"-${abs(t.pnl or 0):.2f}"
@@ -149,63 +154,77 @@ async def cmd_trades(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_accounts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     async with AsyncSessionLocal() as session:
-        result = await session.execute(select(Account))
+        result = await session.execute(select(Account).where(Account.enabled == True))
         accounts = result.scalars().all()
 
     if not accounts:
-        await update.message.reply_text("No accounts configured.")
+        await update.message.reply_text("No active accounts.")
         return
 
-    msg = "👥 <b>ALL ACCOUNTS</b>\n\n"
+    msg = "👥 <b>ACTIVE ACCOUNTS</b>\n\n"
     for acc in accounts:
-        status = "🟢 Active" if acc.enabled else "🔴 Paused"
         msg += (
             f"<b>#{acc.id} {acc.name}</b>\n"
-            f"   {status} | {acc.broker_type.upper()} | {acc.profile}\n"
+            f"   🟢 {acc.broker_type.upper()} | {acc.profile}\n"
             f"   💰 ${acc.balance:,.2f} | {acc.symbol}\n\n"
         )
     await update.message.reply_html(msg)
 
 
 async def cmd_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    today = datetime.utcnow().date()
+    start_today = period_start_utc_naive("today")
     async with AsyncSessionLocal() as session:
-        # Total balance
-        result = await session.execute(select(func.sum(Account.balance)))
+        result = await session.execute(
+            select(Account).where(Account.enabled == True)
+        )
+        enabled = result.scalars().all()
+
+        result = await session.execute(select(func.sum(Account.balance)).where(Account.enabled == True))
         total_balance = result.scalar() or 0
 
-        # Today's trades
-        result = await session.execute(
-            select(Trade).where(
-                Trade.status == "CLOSED",
-                func.date(Trade.closed_at) == today,
-            )
-        )
-        todays_trades = result.scalars().all()
+        result = await session.execute(select(Trade).where(Trade.status == "CLOSED"))
+        all_closed = result.scalars().all()
 
-    pnl = sum(t.pnl or 0 for t in todays_trades)
-    wins = sum(1 for t in todays_trades if (t.pnl or 0) > 0)
-    wr = (wins / len(todays_trades) * 100) if todays_trades else 0
+        result = await session.execute(
+            select(Trade).where(Trade.status == "OPEN")
+        )
+        open_rows = result.scalars().all()
+
+    today_closed = [
+        t for t in all_closed
+        if t.closed_at and start_today and t.closed_at >= start_today
+    ]
+
+    pnl_today = sum(t.pnl or 0 for t in today_closed)
+    all_time = sum(t.pnl or 0 for t in all_closed)
+    wins = sum(1 for t in today_closed if (t.pnl or 0) > 0)
+    wr = (wins / len(today_closed) * 100) if today_closed else 0
+
+    # Balance total only if we have enabled accounts; else 0
+    bal = float(total_balance) if enabled else 0.0
 
     await update.message.reply_html(daily_report_msg({
-        "balance": total_balance,
-        "pnl": pnl,
-        "trades": len(todays_trades),
+        "balance": bal,
+        "today_pnl": pnl_today,
+        "all_time_pnl": all_time,
+        "pnl": pnl_today,
+        "trades": len(today_closed),
         "win_rate": wr,
-        "open_positions": 0,
+        "open_positions": len(open_rows),
     }))
 
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    dash = _dashboard_url()
     await update.message.reply_html(
         "👑 <b>ClubMillies Commands</b>\n\n"
         "/start — Subscribe to alerts\n"
-        "/status — Account balances & equity\n"
+        "/status — Active accounts & balances\n"
         "/trades — Last 10 closed trades\n"
-        "/accounts — All accounts overview\n"
-        "/report — Today's performance\n"
+        "/accounts — Active accounts only\n"
+        "/report — Today + all-time realized P&amp;L (EAT day)\n"
         "/help — This message\n\n"
-        "🌐 Dashboard: <code>http://your-server:3000</code>"
+        f"🌐 Dashboard: <a href=\"{dash}\">{dash}</a>"
     )
 
 
@@ -240,10 +259,10 @@ async def setup_telegram():
     # Set bot commands menu
     await app.bot.set_my_commands([
         BotCommand("start", "Subscribe to trade alerts"),
-        BotCommand("status", "Account overview"),
-        BotCommand("trades", "Recent trades"),
-        BotCommand("accounts", "All accounts"),
-        BotCommand("report", "Performance report"),
+        BotCommand("status", "Active accounts overview"),
+        BotCommand("trades", "Recent closed trades"),
+        BotCommand("accounts", "Active accounts"),
+        BotCommand("report", "Today & all-time P/L"),
         BotCommand("help", "Show commands"),
     ])
 
