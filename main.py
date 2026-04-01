@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from core.database import init_db, init_db_sync, AsyncSessionLocal
 from core.models import Account
 from core.config import settings
+from core.log_redaction import install_telegram_log_redaction
 from accounts.manager import AccountManager
 from api.app import app
 from sqlalchemy import select
@@ -29,6 +30,7 @@ logging.basicConfig(
         logging.StreamHandler(),
     ],
 )
+install_telegram_log_redaction()
 logger = logging.getLogger("clubmillies")
 
 BANNER = r"""

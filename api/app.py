@@ -4,6 +4,7 @@ ClubMillies — FastAPI backend + WebSocket for the dashboard.
 import asyncio
 import json
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Optional
 
@@ -30,7 +31,19 @@ def _signal_list_min_score(requested: Optional[int] = None) -> int:
         return max(6, int(requested))
     return 6
 
-app = FastAPI(title="ClubMillies", version="1.0.0")
+
+@asynccontextmanager
+async def _app_lifespan(app: FastAPI):
+    try:
+        from core.log_redaction import install_telegram_log_redaction
+
+        install_telegram_log_redaction()
+    except Exception:
+        pass
+    yield
+
+
+app = FastAPI(title="ClubMillies", version="1.0.0", lifespan=_app_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
