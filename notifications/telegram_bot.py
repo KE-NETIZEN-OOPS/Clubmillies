@@ -412,7 +412,9 @@ async def setup_telegram():
         BotCommand("help", "Show commands"),
     ])
 
-    enable_polling = (os.getenv("TELEGRAM_ENABLE_POLLING", "false").lower() == "true")
+    # Polling is required for /start, /status, /help, etc. Set false only if another process
+    # polls this bot (or you use a webhook) — otherwise commands never arrive.
+    enable_polling = os.getenv("TELEGRAM_ENABLE_POLLING", "true").lower() in ("1", "true", "yes")
     chat_id = (settings.telegram_chat_id or "").strip()
     if chat_id:
         async with AsyncSessionLocal() as session:
@@ -432,7 +434,16 @@ async def setup_telegram():
 
 async def stop_telegram():
     global app
-    if app:
-        await app.updater.stop()
+    if not app:
+        return
+    try:
+        up = getattr(app, "updater", None)
+        if up and getattr(up, "running", False):
+            await up.stop()
+    except Exception as e:
+        logger.debug(f"Telegram updater stop: {e}")
+    try:
         await app.stop()
         await app.shutdown()
+    except Exception as e:
+        logger.debug(f"Telegram app shutdown: {e}")

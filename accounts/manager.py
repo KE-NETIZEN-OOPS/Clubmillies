@@ -32,6 +32,18 @@ def _price_match(a: Optional[float], b: Optional[float], tol: float = _MT5_LEVEL
     return abs(float(a) - float(b)) <= tol
 
 
+def _mt5_deal_position_id(d) -> int:
+    """Deal row → MT5 position identifier (must match position ticket for P/L aggregation)."""
+    for name in ("position_id", "position"):
+        v = getattr(d, name, None)
+        if v is not None:
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                continue
+    return 0
+
+
 class PaperBroker:
     """Simulated broker for paper trading."""
 
@@ -347,6 +359,19 @@ class MT5LiveBroker:
                 pass
             got = self.mt5.history_deals_get(t1 - timedelta(days=1), t1, position=position_ticket)
             deals = list(got) if got else None
+        if not deals:
+            return None
+        pid = int(position_ticket)
+        before_n = len(deals)
+        deals = [d for d in deals if _mt5_deal_position_id(d) == pid]
+        if len(deals) != before_n:
+            logger.warning(
+                "MT5 fetch_closed_position_details: history had %s deals for ticket %s; "
+                "using %s after position_id filter (stray rows excluded from P/L sum)",
+                before_n,
+                pid,
+                len(deals),
+            )
         if not deals:
             return None
         deals = sorted(deals, key=lambda d: int(getattr(d, "time", 0)))
