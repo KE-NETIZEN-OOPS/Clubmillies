@@ -1,10 +1,26 @@
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
+const API_BASE = (process.env.NEXT_PUBLIC_API_URL || '').replace(/\/$/, '');
 
 export async function fetchApi<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
-    ...options,
-  });
+  const pathNorm = path.startsWith('/') ? path : `/${path}`;
+  const url = `${API_BASE}${pathNorm}`;
+  let res: Response;
+  try {
+    const { headers: optHeaders, ...rest } = options || {};
+    const mergedHeaders: Record<string, string> = {
+      'Content-Type': 'application/json',
+      ...(typeof optHeaders === 'object' && optHeaders !== null && !(optHeaders instanceof Headers)
+        ? (optHeaders as Record<string, string>)
+        : {}),
+    };
+    res = await fetch(url, { ...rest, headers: mergedHeaders });
+  } catch (e) {
+    const baseHint =
+      typeof window !== 'undefined' && !API_BASE
+        ? ' Configure NEXT_PUBLIC_API_URL to your API base URL (e.g. https://api.yourdomain.com) in the dashboard env and redeploy.'
+        : '';
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`${msg}${baseHint}`);
+  }
   if (!res.ok) {
     let detail = '';
     try {
@@ -214,6 +230,10 @@ export interface TweetData {
   url?: string | null;
   created_at: string | null;
   fetched_at: string | null;
+  /** Per-post gold/XAU intel from last fetch (Claude) */
+  ai_direction?: string | null;
+  ai_confidence?: number | null;
+  ai_reasoning?: string | null;
 }
 
 export interface IntelConfig {

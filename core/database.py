@@ -57,6 +57,14 @@ def ensure_schema_sync():
             alters.append("ALTER TABLE ai_analyses ADD COLUMN trade_id INTEGER")
         if "metrics" not in aicols:
             alters.append("ALTER TABLE ai_analyses ADD COLUMN metrics TEXT")
+    twcols = _cols("tweets")
+    if twcols:
+        if "ai_direction" not in twcols:
+            alters.append("ALTER TABLE tweets ADD COLUMN ai_direction TEXT")
+        if "ai_confidence" not in twcols:
+            alters.append("ALTER TABLE tweets ADD COLUMN ai_confidence INTEGER")
+        if "ai_reasoning" not in twcols:
+            alters.append("ALTER TABLE tweets ADD COLUMN ai_reasoning TEXT")
 
     if not alters:
         return

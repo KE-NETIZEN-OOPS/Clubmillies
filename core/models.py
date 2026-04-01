@@ -126,3 +126,7 @@ class Tweet(Base):
     url = Column(String(300), nullable=True)
     created_at = Column(DateTime, nullable=True)
     fetched_at = Column(DateTime, default=datetime.utcnow)
+    # Per-post intel (filled after Claude analysis on fetch)
+    ai_direction = Column(String(20), nullable=True)
+    ai_confidence = Column(Integer, nullable=True)
+    ai_reasoning = Column(Text, nullable=True)

@@ -17,6 +17,11 @@ const SOURCE_LABEL: Record<string, string> = {
   trade_close: 'Performance (after each close)',
 };
 
+function xPostUrl(t: TweetData): string {
+  if (t.url && /^https?:\/\//i.test(t.url)) return t.url;
+  return `https://x.com/i/web/status/${encodeURIComponent(t.tweet_id)}`;
+}
+
 export default function NewsPage() {
   const [news, setNews] = useState<NewsData[]>([]);
   const [analyses, setAnalyses] = useState<AnalysisData[]>([]);
@@ -28,6 +33,7 @@ export default function NewsPage() {
   const [intelLast, setIntelLast] = useState<string | null>(null);
   const [analyzingId, setAnalyzingId] = useState<number | null>(null);
   const [analyzeErr, setAnalyzeErr] = useState<string | null>(null);
+  const [intelModalTweet, setIntelModalTweet] = useState<TweetData | null>(null);
 
   function isGarbageAnalysis(a: AnalysisData): boolean {
     const r = (a.reasoning || '').toLowerCase();
@@ -61,6 +67,15 @@ export default function NewsPage() {
     return () => clearInterval(t);
   }, []);
 
+  useEffect(() => {
+    if (!intelModalTweet) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setIntelModalTweet(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [intelModalTweet]);
+
   async function handleFetchIntel() {
     setIntelError(null);
     setIntelLoading(true);
@@ -70,12 +85,13 @@ export default function NewsPage() {
         `Found ${r.tweets_found} posts (${r.tweets_new_rows} new). ` +
           `AI: ${r.analysis.direction} (${r.analysis.confidence}%)`
       );
-      const [tList, aList] = await Promise.all([
-        api.tweets(),
-        api.analyses('limit=40'),
-      ]);
+      const tList = await api.tweets();
       setTweets(tList);
-      setAnalyses(aList);
+      try {
+        setAnalyses(await api.analyses('limit=40'));
+      } catch (ae) {
+        console.warn('AI analyses refresh failed after intel fetch:', ae);
+      }
     } catch (e) {
       setIntelError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -315,22 +331,40 @@ export default function NewsPage() {
             ) : (
               <div className="space-y-3 max-h-[70vh] overflow-y-auto">
                 {tweets.map((t) => (
-                  <div key={t.id} className="p-3 rounded-lg bg-white/5 border border-white/5">
-                    <div className="flex items-center justify-between mb-1">
+                  <button
+                    key={t.id}
+                    type="button"
+                    onClick={() => setIntelModalTweet(t)}
+                    className="w-full text-left p-3 rounded-lg bg-white/5 border border-white/5 hover:border-neon-cyan/25 hover:bg-white/[0.07] transition-colors"
+                  >
+                    <div className="flex items-center justify-between mb-1 gap-2">
                       <span className="text-xs text-gray-500">@{t.author}</span>
-                      {t.url ? (
-                        <a
-                          className="text-xs text-neon-cyan hover:underline"
-                          href={t.url}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          open
-                        </a>
-                      ) : null}
+                      <div className="flex items-center gap-2 shrink-0">
+                        {t.ai_direction ? (
+                          <NeonBadge
+                            label={t.ai_direction.toUpperCase()}
+                            variant={
+                              t.ai_direction === 'bullish'
+                                ? 'buy'
+                                : t.ai_direction === 'bearish'
+                                  ? 'sell'
+                                  : 'neutral'
+                            }
+                          />
+                        ) : null}
+                        <span className="text-[10px] text-neon-cyan">Details →</span>
+                      </div>
                     </div>
-                    <p className="text-sm text-gray-400 whitespace-pre-wrap">{t.text}</p>
-                    <p className="text-[10px] text-gray-600 mt-2">
+                    <p className="text-sm text-gray-400 line-clamp-3 whitespace-pre-wrap">{t.text}</p>
+                    {t.ai_reasoning ? (
+                      <p className="text-xs text-gray-500 mt-2 line-clamp-2 border-t border-white/5 pt-2">
+                        <span className="text-gold/90">Impact: </span>
+                        {t.ai_reasoning}
+                      </p>
+                    ) : (
+                      <p className="text-[10px] text-gray-600 mt-2 italic">Click for full post &amp; AI impact</p>
+                    )}
+                    <p className="text-[10px] text-gray-600 mt-1">
                       {t.created_at
                         ? formatEAT(t.created_at)
                         : t.fetched_at
@@ -338,13 +372,84 @@ export default function NewsPage() {
                           : ''}{' '}
                       EAT
                     </p>
-                  </div>
+                  </button>
                 ))}
               </div>
             )}
           </GlowCard>
         </div>
       </div>
+
+      {intelModalTweet ? (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          onClick={() => setIntelModalTweet(null)}
+        >
+          <motion.div
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="max-w-lg w-full max-h-[min(85vh,640px)] overflow-y-auto rounded-2xl border border-neon-cyan/20 bg-dark-200 p-5 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-2 mb-3">
+              <div>
+                <p className="text-xs text-gray-500">@{intelModalTweet.author}</p>
+                <p className="text-[10px] text-gray-600 mt-0.5">id {intelModalTweet.tweet_id}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIntelModalTweet(null)}
+                className="text-gray-500 hover:text-white text-sm px-2 py-0.5 rounded-lg border border-white/10"
+              >
+                Close
+              </button>
+            </div>
+            <div className="space-y-4">
+              <div>
+                <p className="text-[10px] font-semibold text-gray-500 uppercase mb-1">Post</p>
+                <p className="text-sm text-gray-200 whitespace-pre-wrap leading-relaxed">{intelModalTweet.text}</p>
+              </div>
+              {intelModalTweet.ai_reasoning ? (
+                <div>
+                  <p className="text-[10px] font-semibold text-gold uppercase mb-1">Gold / XAU — market impact (AI)</p>
+                  <div className="flex items-center gap-2 mb-2">
+                    {intelModalTweet.ai_direction ? (
+                      <NeonBadge
+                        label={intelModalTweet.ai_direction.toUpperCase()}
+                        variant={
+                          intelModalTweet.ai_direction === 'bullish'
+                            ? 'buy'
+                            : intelModalTweet.ai_direction === 'bearish'
+                              ? 'sell'
+                              : 'neutral'
+                        }
+                      />
+                    ) : null}
+                    {intelModalTweet.ai_confidence != null ? (
+                      <span className="text-xs text-gray-400">Confidence {intelModalTweet.ai_confidence}%</span>
+                    ) : null}
+                  </div>
+                  <p className="text-sm text-gray-300 leading-relaxed whitespace-pre-wrap">
+                    {intelModalTweet.ai_reasoning}
+                  </p>
+                </div>
+              ) : (
+                <p className="text-xs text-gray-500">No per-post AI yet — run Fetch intel again with ANTHROPIC_API_KEY on the API server.</p>
+              )}
+              <a
+                href={xPostUrl(intelModalTweet)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center justify-center w-full py-2.5 rounded-xl text-sm font-medium bg-neon-cyan/15 text-neon-cyan border border-neon-cyan/40 hover:bg-neon-cyan/25"
+              >
+                Open post on X
+              </a>
+            </div>
+          </motion.div>
+        </div>
+      ) : null}
     </div>
   );
 }

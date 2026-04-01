@@ -581,7 +581,38 @@ async def intel_fetch_tweets(body: IntelFetchBody):
     analyzer = ClaudeAnalyzer()
     analysis: dict
     if tweets and analyzer.enabled:
-        analysis = await analyzer.analyze_tweets(tweets, search_query=q)
+        uni_summary, per_post = await analyzer.analyze_intel_fetch_unified(tweets, search_query=q)
+        if uni_summary is not None:
+            analysis = uni_summary
+            if per_post:
+                async with AsyncSessionLocal() as session:
+                    for row in per_post:
+                        tid = row.get("tweet_id")
+                        if not tid:
+                            continue
+                        await session.execute(
+                            update(Tweet)
+                            .where(Tweet.tweet_id == str(tid))
+                            .values(
+                                ai_direction=row.get("direction"),
+                                ai_confidence=row.get("confidence"),
+                                ai_reasoning=row.get("market_impact"),
+                            )
+                        )
+                    await session.commit()
+            tw_snip = "\n".join((t.get("text") or "")[:120] for t in tweets[:8])
+            await analyzer._save_analysis(
+                "twitter",
+                tw_snip[:500],
+                analysis,
+                metrics={
+                    "search_query": q,
+                    "tweet_count": len(tweets),
+                    "per_post_intel_count": len(per_post or []),
+                },
+            )
+        else:
+            analysis = await analyzer.analyze_tweets(tweets, search_query=q)
     elif tweets:
         analysis = {
             "direction": "neutral",
@@ -828,7 +859,7 @@ async def list_analyses(limit: int = 20, account_id: Optional[int] = None):
 async def list_tweets(limit: int = 30):
     async with AsyncSessionLocal() as session:
         result = await session.execute(
-            select(Tweet).order_by(desc(Tweet.created_at)).limit(limit)
+            select(Tweet).order_by(desc(Tweet.fetched_at)).limit(limit)
         )
         tweets = result.scalars().all()
 
@@ -841,6 +872,9 @@ async def list_tweets(limit: int = 30):
             "url": t.url,
             "created_at": t.created_at.isoformat() if t.created_at else None,
             "fetched_at": t.fetched_at.isoformat() if t.fetched_at else None,
+            "ai_direction": getattr(t, "ai_direction", None),
+            "ai_confidence": getattr(t, "ai_confidence", None),
+            "ai_reasoning": getattr(t, "ai_reasoning", None),
         }
         for t in tweets
     ]

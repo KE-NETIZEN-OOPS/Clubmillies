@@ -6,7 +6,7 @@ import asyncio
 import logging
 import json
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from sqlalchemy import select, desc
 
@@ -96,6 +96,106 @@ class ClaudeAnalyzer:
                 "reasoning": err,
                 "_skip_persist": True,
             }
+
+    async def _call_claude_json_object(
+        self, system: str, prompt: str, max_tokens: int = 4000
+    ) -> Optional[dict[str, Any]]:
+        """Raw JSON object from Claude (nested OK). Returns None if disabled or parse fails."""
+        if not self.enabled:
+            return None
+        try:
+            client = self._get_client()
+            response = await asyncio.to_thread(
+                client.messages.create,
+                model="claude-sonnet-4-20250514",
+                max_tokens=max_tokens,
+                system=system,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = response.content[0].text
+            start = text.find("{")
+            end = text.rfind("}") + 1
+            if start >= 0 and end > start:
+                return json.loads(text[start:end])
+        except Exception as e:
+            logger.error(f"Claude JSON object parse error: {e}")
+        return None
+
+    async def analyze_intel_fetch_unified(
+        self, tweets: list[dict], *, search_query: str = ""
+    ) -> tuple[Optional[dict], list[dict]]:
+        """
+        Single Claude call: overall summary + per-post gold/XAU market impact.
+        Returns (summary_dict or None on failure, per_post rows for DB).
+        """
+        if not tweets:
+            return (
+                {"direction": "neutral", "confidence": 0, "reasoning": "No posts to analyze"},
+                [],
+            )
+
+        capped = tweets[:22]
+        lines = []
+        for t in capped:
+            tid = str(t.get("id", "")).strip()
+            txt = (t.get("text") or "").replace("\n", " ").strip()[:500]
+            au = (t.get("author") or "").strip()
+            lines.append(f"tweet_id: {tid}\n@{au}: {txt}")
+        block = "\n---\n".join(lines)
+
+        cal_snip = ""
+        try:
+            async with AsyncSessionLocal() as session:
+                nr = await session.execute(
+                    select(NewsEvent).order_by(desc(NewsEvent.event_time)).limit(18)
+                )
+                evs = nr.scalars().all()
+            if evs:
+                cal_lines = [f"- {e.title} ({e.currency}, {e.impact})" for e in evs]
+                cal_snip = "\n\nRecent economic calendar (context):\n" + "\n".join(cal_lines)
+        except Exception as e:
+            logger.debug(f"Calendar snippet skipped: {e}")
+
+        system = (
+            "You are a professional gold (XAU/USD) and macro analyst. "
+            "For EACH post, explain how it could plausibly affect gold spot, USD/DXY, real yields, or risk sentiment. "
+            "Respond ONLY with valid JSON (no markdown fences): "
+            '{"summary":{"direction":"bullish"|"bearish"|"neutral","confidence":0-100,'
+            '"reasoning":"2-5 sentences synthesizing the batch for gold traders"},'
+            '"posts":[{"tweet_id":"string (exact from input)","direction":"bullish"|"bearish"|"neutral",'
+            '"confidence":0-100,"market_impact":"2-6 sentences: THIS post only — mechanism for XAU/USD"}]}'
+        )
+        prompt = (
+            f"Search / filter context: {search_query or 'manual intel fetch'}\n\n"
+            f"Posts to analyze:\n{block}{cal_snip}"
+        )
+
+        data = await self._call_claude_json_object(system, prompt, max_tokens=4000)
+        if not data:
+            return None, []
+
+        summary = data.get("summary") or {}
+        out_summary = {
+            "direction": summary.get("direction", "neutral"),
+            "confidence": int(summary.get("confidence", 0) or 0),
+            "reasoning": (summary.get("reasoning") or "").strip(),
+        }
+        per_post: list[dict] = []
+        for p in data.get("posts") or []:
+            if not isinstance(p, dict):
+                continue
+            tid = str(p.get("tweet_id", "")).strip()
+            if not tid:
+                continue
+            per_post.append(
+                {
+                    "tweet_id": tid,
+                    "direction": (p.get("direction") or "neutral")[:20],
+                    "confidence": int(p.get("confidence", 0) or 0),
+                    "market_impact": (p.get("market_impact") or "")[:8000],
+                }
+            )
+        return out_summary, per_post
 
     async def analyze_news(self, event: dict) -> dict:
         """Analyze a news event's impact on gold."""
