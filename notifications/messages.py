@@ -22,37 +22,44 @@ def trade_opened_msg(data: dict) -> str:
 
 
 def trade_closed_msg(data: dict) -> str:
-    pnl = data.get("pnl") or 0
+    pnl = float(data.get("pnl") or 0)
     reason = (data.get("reason") or "").upper()
-    direction = data.get("direction", "")
+    direction = (data.get("direction") or "").strip()
+    trade_id = data.get("trade_id")
+    lots = data.get("lots")
+    try:
+        lots_s = f"{float(lots):.2f}" if lots is not None else "—"
+    except (TypeError, ValueError):
+        lots_s = "—"
 
     is_tp = reason in ("TP", "TAKE PROFIT", "TAKE_PROFIT")
     is_sl = reason in ("SL", "STOP LOSS", "STOP_LOSS")
 
     if is_tp:
-        header = "🎯🏆 <b>TAKE PROFIT — ClubMillies Master Signals</b>"
+        header = "🎯🏆 <b>Take profit hit — this trade closed</b>"
         extra = random.choice(TP_CELEBRATION)
         emoji_line = "✨💰🥂 " + random.choice(WEALTH_MOTIVATION)
     elif is_sl:
-        header = "🛑 <b>STOP LOSS FILLED</b> — plan respected"
+        header = "🛑 <b>Stop loss — this trade closed</b>"
         extra = random.choice(SL_FUNNY)
         emoji_line = random.choice(SL_MEME_LINES)
     else:
-        header = f"🔄 <b>TRADE CLOSED</b> ({reason})"
+        header = f"🔄 <b>Trade closed</b> ({reason})"
         extra = random.choice(LOSS_MESSAGES) if pnl <= 0 else random.choice(WIN_MESSAGES)
         emoji_line = ""
 
     pnl_emoji = "✅" if pnl > 0 else "❌"
     pnl_str = f"+${pnl:.2f}" if pnl > 0 else f"-${abs(pnl):.2f}"
 
+    id_part = f"Trade <code>#{trade_id}</code> · " if trade_id else ""
     msg = (
         f"{header}\n\n"
-        f"📊 {direction} closed\n"
-        f"📍 Entry: <code>${data.get('entry', 0):.2f}</code>\n"
-        f"📍 Exit: <code>${data.get('exit', 0):.2f}</code>\n"
-        f"{pnl_emoji} P&amp;L (broker net): <code>{pnl_str}</code>\n"
-        f"<i>Net = MT5 profit + swap + commission for this position (account currency). "
-        f"Not the same as a quick “price move × one lot” estimate.</i>\n\n"
+        f"{id_part}<b>{direction}</b> · {lots_s} lot(s)\n"
+        f"📍 Entry <code>${data.get('entry', 0):.2f}</code> → "
+        f"exit <code>${data.get('exit', 0):.2f}</code>\n\n"
+        f"💵 <b>This trade’s P&amp;L only:</b> {pnl_emoji} <code>{pnl_str}</code>\n"
+        f"<i>Broker net for this one position (profit + swap + commission). "
+        f"Not your account balance or other trades.</i>\n\n"
         f"{extra}\n"
     )
     if emoji_line:
