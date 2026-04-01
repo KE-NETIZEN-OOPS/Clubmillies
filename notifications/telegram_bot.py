@@ -42,15 +42,16 @@ async def _broadcast(text: str):
 # ── Event Handlers (subscribe to event bus) ──────────────────────────
 
 async def on_trade_opened(event):
+    if event.data.get("score", 0) < int(settings.min_confluence_floor):
+        return
     await _broadcast(trade_opened_msg(event.data))
 
 async def on_trade_closed(event):
     await _broadcast(trade_closed_msg(event.data))
 
 async def on_signal(event):
-    # Only send BUY/SELL signals that meet trading threshold (5+)
     signal = event.data.get("signal")
-    if signal in ("BUY", "SELL") and event.data.get("score", 0) >= 5:
+    if signal in ("BUY", "SELL") and event.data.get("score", 0) >= int(settings.min_confluence_floor):
         await _broadcast(signal_msg(event.data))
 
 async def on_news(event):
@@ -58,8 +59,17 @@ async def on_news(event):
         await _broadcast(news_alert_msg(event.data))
 
 async def on_ai_analysis(event):
-    if event.data.get("confidence", 0) >= 70:
-        await _broadcast(ai_analysis_msg(event.data))
+    data = event.data or {}
+    src = data.get("source", "")
+    conf = data.get("confidence", 0)
+    # Performance summaries are verbose on Telegram — enable explicitly.
+    if src == "trade_close":
+        if (os.getenv("TELEGRAM_TRADE_CLOSE_AI", "false").lower() != "true"):
+            return
+        await _broadcast(ai_analysis_msg(data))
+        return
+    if conf >= 70:
+        await _broadcast(ai_analysis_msg(data))
 
 
 # ── Command Handlers ────────────────────────────────────────────────

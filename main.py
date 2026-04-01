@@ -63,13 +63,16 @@ async def create_default_accounts():
             # Never hardcode real credentials in source control.
             create_paper = (os.getenv("CREATE_PAPER_DEMO", "false").lower() == "true")
             if create_paper:
+                bal = float(os.getenv("PAPER_BALANCE", "10000"))
                 session.add(Account(
                     name="Paper Demo",
                     broker_type="paper",
                     symbol=os.getenv("DEFAULT_SYMBOL", "XAUUSDm"),
                     profile=os.getenv("DEFAULT_PROFILE", "SNIPER"),
-                    balance=float(os.getenv("PAPER_BALANCE", "10000")),
-                    equity=float(os.getenv("PAPER_BALANCE", "10000")),
+                    balance=bal,
+                    equity=bal,
+                    starting_balance=bal,
+                    is_demo=True,
                     enabled=True,
                 ))
 
@@ -88,6 +91,7 @@ async def create_default_accounts():
                     profile=os.getenv("DEFAULT_PROFILE", "SNIPER"),
                     balance=0.0,
                     equity=0.0,
+                    starting_balance=0.0,
                     enabled=True,
                 ))
             await session.commit()

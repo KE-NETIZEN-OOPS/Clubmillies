@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { motion, AnimatePresence } from 'framer-motion';
 import GlowCard from '@/components/ui/GlowCard';
 import NeonBadge from '@/components/ui/NeonBadge';
@@ -56,6 +57,10 @@ export default function AccountsPage() {
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {accounts.map((acc) => (
           <GlowCard key={acc.id} animate>
+            <Link
+              href={`/accounts/${acc.id}`}
+              className="block text-left w-full rounded-lg focus:outline-none focus:ring-2 focus:ring-neon-cyan/40"
+            >
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
                 <div className={`w-3 h-3 rounded-full ${acc.enabled ? 'bg-profit pulse-dot pulse-dot-green' : 'bg-gray-600'}`} />
@@ -70,9 +75,16 @@ export default function AccountsPage() {
               <div className="flex justify-between"><span className="text-gray-500">Broker</span><span className="text-gray-300">{acc.broker_type.toUpperCase()}</span></div>
               <div className="flex justify-between"><span className="text-gray-500">Symbol</span><span className="text-gold">{acc.symbol}</span></div>
               <div className="flex justify-between"><span className="text-gray-500">Risk</span><span>{(acc.risk_per_trade * 100).toFixed(0)}%</span></div>
+              {(acc.login || acc.is_demo != null) && (
+                <>
+                  <div className="flex justify-between"><span className="text-gray-500">Login</span><span className="font-mono text-xs">{acc.login || '—'}</span></div>
+                  <div className="flex justify-between"><span className="text-gray-500">Mode</span><span>{acc.is_demo === true ? 'Demo' : acc.is_demo === false ? 'Live' : acc.broker_type === 'paper' ? 'Paper' : '—'}</span></div>
+                </>
+              )}
             </div>
+            </Link>
 
-            <div className="flex gap-2">
+            <div className="flex gap-2 mt-4">
               <button
                 onClick={() => toggleAccount(acc.id)}
                 className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${

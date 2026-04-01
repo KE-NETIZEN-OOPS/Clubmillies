@@ -29,6 +29,8 @@ class Account(Base):
     enabled = Column(Boolean, default=True)
     balance = Column(Float, default=10000.0)
     equity = Column(Float, default=10000.0)
+    starting_balance = Column(Float, default=10000.0)
+    is_demo = Column(Boolean, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     trades = relationship("Trade", back_populates="account", lazy="dynamic")
@@ -49,7 +51,8 @@ class Trade(Base):
     confluence_score = Column(Integer, default=0)
     confluence_reasons = Column(JSON, default=list)
     status = Column(String(20), default="OPEN")  # OPEN, CLOSED
-    close_reason = Column(String(30), nullable=True)  # TP, SL, SIGNAL, MANUAL
+    close_reason = Column(String(30), nullable=True)  # TP, SL, REVERSAL, CLIENT, etc.
+    mt5_position_ticket = Column(Integer, nullable=True)
     opened_at = Column(DateTime, default=datetime.utcnow)
     closed_at = Column(DateTime, nullable=True)
 
@@ -91,12 +94,15 @@ class AIAnalysis(Base):
     __tablename__ = "ai_analyses"
 
     id = Column(Integer, primary_key=True)
-    source = Column(String(30))  # news, twitter, market
+    source = Column(String(30))  # news, twitter, market, trade_close
+    account_id = Column(Integer, nullable=True)
+    trade_id = Column(Integer, nullable=True)
     input_summary = Column(Text)
     direction = Column(String(20))  # bullish, bearish, neutral
     confidence = Column(Integer, default=0)  # 0-100
     reasoning = Column(Text)
     raw_response = Column(Text, nullable=True)
+    metrics = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 

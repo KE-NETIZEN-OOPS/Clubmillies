@@ -1,8 +1,8 @@
 """
 ClubMillies — Database setup.
 """
+from sqlalchemy import create_engine, text, inspect
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from core.config import settings
 from core.models import Base
@@ -19,10 +19,57 @@ SyncSessionLocal = sessionmaker(bind=sync_engine)
 async def init_db():
     async with async_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    ensure_schema_sync()
 
 
 def init_db_sync():
     Base.metadata.create_all(bind=sync_engine)
+
+
+def ensure_schema_sync():
+    """SQLite-only lightweight migrations for existing DB files."""
+    url = str(sync_engine.url)
+    if "sqlite" not in url:
+        return
+    insp = inspect(sync_engine)
+
+    def _cols(table: str) -> set[str]:
+        try:
+            return {c["name"] for c in insp.get_columns(table)}
+        except Exception:
+            return set()
+
+    alters: list[str] = []
+    tcols = _cols("trades")
+    if tcols and "mt5_position_ticket" not in tcols:
+        alters.append("ALTER TABLE trades ADD COLUMN mt5_position_ticket INTEGER")
+    acols = _cols("accounts")
+    if acols:
+        if "starting_balance" not in acols:
+            alters.append("ALTER TABLE accounts ADD COLUMN starting_balance FLOAT")
+        if "is_demo" not in acols:
+            alters.append("ALTER TABLE accounts ADD COLUMN is_demo BOOLEAN")
+    aicols = _cols("ai_analyses")
+    if aicols:
+        if "account_id" not in aicols:
+            alters.append("ALTER TABLE ai_analyses ADD COLUMN account_id INTEGER")
+        if "trade_id" not in aicols:
+            alters.append("ALTER TABLE ai_analyses ADD COLUMN trade_id INTEGER")
+        if "metrics" not in aicols:
+            alters.append("ALTER TABLE ai_analyses ADD COLUMN metrics TEXT")
+
+    if not alters:
+        return
+    with sync_engine.begin() as conn:
+        for stmt in alters:
+            conn.execute(text(stmt))
+        if any("starting_balance" in a for a in alters):
+            conn.execute(
+                text(
+                    "UPDATE accounts SET starting_balance = balance "
+                    "WHERE starting_balance IS NULL OR starting_balance = 0"
+                )
+            )
 
 
 async def get_session() -> AsyncSession:

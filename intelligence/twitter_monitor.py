@@ -3,21 +3,23 @@ ClubMillies — Twitter/X monitor for gold market intelligence.
 Supports two modes:
   1. Official API (if bearer token provided) — most reliable
   2. Free scraping via RSS bridges and syndication — no API key needed
+Plus: Google News RSS headlines (no Twitter login; configurable queries).
 """
 import asyncio
+import hashlib
 import logging
 import re
-from datetime import datetime
+import time
+import urllib.parse
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 import httpx
 from bs4 import BeautifulSoup
 
 from core.config import settings
+from intelligence.tweet_persist import persist_tweet_dicts
 from core.events import bus
-from core.database import AsyncSessionLocal
-from core.models import Tweet
-from sqlalchemy import select
-
 logger = logging.getLogger("clubmillies.twitter")
 
 # Key accounts for gold/forex intelligence
@@ -51,6 +53,7 @@ class TwitterMonitor:
         self._api_blocked = False
         self._working_bridge: str | None = None
         self._seen_tweets: set[str] = set()
+        self._rss_cache: dict[str, tuple[float, list]] = {}
 
     # ── Official API Mode ────────────────────────────────────────────
 
@@ -255,6 +258,136 @@ class TwitterMonitor:
             await asyncio.sleep(2)  # Be polite with rate limiting
         return all_tweets
 
+    async def _fetch_google_news_rss(self) -> list[dict]:
+        """Headlines from Google News RSS (keyword intel — not X login)."""
+        raw = (settings.google_news_queries or "").strip()
+        if not raw:
+            return []
+        queries = [q.strip() for q in raw.split(",") if q.strip()][:5]
+        out: list[dict] = []
+        headers = {"User-Agent": "Mozilla/5.0 ClubMillies/1.0"}
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers=headers) as client:
+            for q in queries:
+                cache_key = f"gn:{q}"
+                now = time.time()
+                if cache_key in self._rss_cache and now - self._rss_cache[cache_key][0] < 300:
+                    out.extend(self._rss_cache[cache_key][1])
+                    continue
+                url = (
+                    "https://news.google.com/rss/search?"
+                    + urllib.parse.urlencode({"q": q, "hl": "en-US", "gl": "US", "ceid": "US:en"})
+                )
+                try:
+                    resp = await client.get(url)
+                    if resp.status_code != 200:
+                        continue
+                    soup = BeautifulSoup(resp.text, "xml")
+                    batch = []
+                    for item in soup.find_all("item")[:15]:
+                        title_el = item.find("title")
+                        link_el = item.find("link")
+                        pub = item.find("pubDate")
+                        title = title_el.get_text(strip=True) if title_el else ""
+                        link = link_el.get_text(strip=True) if link_el else ""
+                        if not title:
+                            continue
+                        created_at = None
+                        if pub:
+                            try:
+                                created_at = parsedate_to_datetime(pub.get_text())
+                                if created_at.tzinfo:
+                                    created_at = created_at.astimezone(timezone.utc).replace(tzinfo=None)
+                            except Exception:
+                                created_at = datetime.utcnow()
+                        else:
+                            created_at = datetime.utcnow()
+                        tid = "gn_" + hashlib.sha256((link + title).encode()).hexdigest()[:20]
+                        batch.append({
+                            "id": tid,
+                            "text": f"[News] {title}",
+                            "author": "News",
+                            "created_at": created_at.isoformat() + "Z",
+                            "source": "google_news",
+                            "url": link or None,
+                        })
+                    self._rss_cache[cache_key] = (now, batch)
+                    out.extend(batch)
+                except Exception as e:
+                    logger.debug(f"Google News RSS error for {q!r}: {e}")
+        return out
+
+    async def _fetch_twitter_recent_search(self) -> list[dict]:
+        """Twitter API v2 recent search (needs Elevated access for most projects)."""
+        if not self.bearer_token or self._api_blocked:
+            return []
+        raw = (settings.twitter_search_queries or "").strip()
+        if not raw:
+            return []
+        queries = [q.strip() for q in raw.split(",") if q.strip()][:4]
+        out: list[dict] = []
+        headers = {"Authorization": f"Bearer {self.bearer_token}"}
+        async with httpx.AsyncClient(timeout=25, headers=headers) as client:
+            for q in queries:
+                try:
+                    resp = await client.get(
+                        "https://api.twitter.com/2/tweets/search/recent",
+                        params={
+                            "query": q,
+                            "max_results": 10,
+                            "tweet.fields": "created_at,author_id,text",
+                        },
+                    )
+                    if resp.status_code == 402:
+                        self._api_blocked = True
+                        logger.warning("Twitter API search blocked (plan) — use account RSS only")
+                        return out
+                    if resp.status_code != 200:
+                        logger.warning(f"Twitter search HTTP {resp.status_code} for query snippet")
+                        continue
+                    data = resp.json()
+                    for t in data.get("data", []) or []:
+                        ts = t.get("created_at", "")
+                        out.append({
+                            "id": t.get("id", ""),
+                            "text": t.get("text", ""),
+                            "author": "search",
+                            "created_at": ts,
+                            "source": "twitter_search",
+                            "url": f"https://x.com/i/web/status/{t.get('id','')}",
+                        })
+                except Exception as e:
+                    logger.debug(f"Twitter search error: {e}")
+        return out
+
+    @staticmethod
+    def _tweet_age_seconds(tweet: dict) -> float:
+        ca = tweet.get("created_at") or ""
+        if not ca:
+            return 0.0
+        try:
+            dt = datetime.fromisoformat(ca.replace("Z", "+00:00"))
+            if dt.tzinfo:
+                dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+            return (datetime.utcnow() - dt).total_seconds()
+        except Exception:
+            return 0.0
+
+    def _filter_fresh_for_ai(self, tweets: list[dict], max_age_sec: int = 600) -> list[dict]:
+        """Prefer items under max_age_sec for Claude batching."""
+        fresh = [t for t in tweets if self._tweet_age_seconds(t) <= max_age_sec]
+        return fresh if fresh else tweets[:25]
+
+    def _dedupe(self, tweets: list[dict]) -> list[dict]:
+        seen: set[str] = set()
+        out: list[dict] = []
+        for t in tweets:
+            tid = str(t.get("id", ""))
+            if not tid or tid in seen:
+                continue
+            seen.add(tid)
+            out.append(t)
+        return out
+
     async def monitor_loop(self):
         """Continuously monitor Twitter every 5 minutes."""
         mode = "API" if self.use_api else "free scraping"
@@ -270,16 +403,20 @@ class TwitterMonitor:
 
         while True:
             try:
-                tweets = await self.fetch_all_accounts()
-                if tweets:
-                    logger.info(f"Fetched {len(tweets)} tweets from {len(self.accounts)} accounts")
-                    await self._save_tweets(tweets)
-                    for tweet in tweets:
+                tw = await self.fetch_all_accounts()
+                tw.extend(await self._fetch_google_news_rss())
+                tw.extend(await self._fetch_twitter_recent_search())
+                tw = self._dedupe(tw)
+                if tw:
+                    logger.info(
+                        f"Intel batch: {len(tw)} items (accounts + News + X API; SociaVault is manual)"
+                    )
+                    await self._save_tweets(tw)
+                    for tweet in tw:
                         await bus.emit("twitter.tweet", tweet)
-                    # Emit a batch event for downstream consumers (AI, dashboard, etc.)
-                    await bus.emit("twitter.tweets", {"tweets": tweets})
+                    fresh = self._filter_fresh_for_ai(tw, max_age_sec=600)
+                    await bus.emit("twitter.tweets", {"tweets": fresh})
 
-                    # Keep seen tweets cache manageable
                     if len(self._seen_tweets) > 5000:
                         self._seen_tweets = set(list(self._seen_tweets)[-2000:])
             except Exception as e:
@@ -288,37 +425,4 @@ class TwitterMonitor:
             await asyncio.sleep(300)  # 5 minutes
 
     async def _save_tweets(self, tweets: list[dict]):
-        async with AsyncSessionLocal() as session:
-            for t in tweets:
-                tweet_id = str(t.get("id", "")).strip()
-                if not tweet_id:
-                    continue
-
-                existing = await session.execute(
-                    select(Tweet).where(Tweet.tweet_id == tweet_id)
-                )
-                if existing.scalar_one_or_none():
-                    continue
-
-                created_at = None
-                try:
-                    ca = t.get("created_at")
-                    if ca:
-                        created_at = datetime.fromisoformat(ca.replace("Z", "+00:00"))
-                except Exception:
-                    created_at = None
-
-                url = t.get("url")
-                if not url:
-                    author = t.get("author", "")
-                    url = f"https://x.com/{author}/status/{tweet_id}" if author and tweet_id.isdigit() else None
-
-                session.add(Tweet(
-                    tweet_id=tweet_id,
-                    author=t.get("author", ""),
-                    text=t.get("text", ""),
-                    url=url,
-                    created_at=created_at,
-                ))
-
-            await session.commit()
+        await persist_tweet_dicts(tweets)

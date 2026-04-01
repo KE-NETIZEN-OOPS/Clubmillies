@@ -11,7 +11,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPExcept
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from sqlalchemy import select, func, update, desc, delete
+from sqlalchemy import select, func, update, desc, delete, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
@@ -125,9 +125,18 @@ async def get_dashboard():
         )
         all_trades = result.scalars().all()
 
-        # Recent signals
+        # Recent signals (hide weak directional setups from the dashboard)
+        floor = int(settings.min_confluence_floor)
         result = await session.execute(
-            select(Signal).order_by(desc(Signal.created_at)).limit(5)
+            select(Signal)
+            .where(
+                or_(
+                    Signal.signal_type == "HOLD",
+                    Signal.score >= floor,
+                )
+            )
+            .order_by(desc(Signal.created_at))
+            .limit(8)
         )
         recent_signals = result.scalars().all()
 
@@ -179,13 +188,122 @@ async def list_accounts():
     return [
         {
             "id": a.id, "name": a.name, "broker_type": a.broker_type,
+            "login": a.login or "",
+            "server": a.server or "",
             "symbol": a.symbol, "timeframe": a.timeframe, "profile": a.profile,
             "risk_per_trade": a.risk_per_trade, "max_open_trades": a.max_open_trades,
-            "balance": a.balance, "equity": a.equity, "enabled": a.enabled,
+            "balance": a.balance, "equity": a.equity,
+            "starting_balance": getattr(a, "starting_balance", None) or a.balance,
+            "is_demo": getattr(a, "is_demo", None),
+            "enabled": a.enabled,
             "created_at": a.created_at.isoformat() if a.created_at else None,
         }
         for a in accounts
     ]
+
+
+@app.get("/api/accounts/{account_id}")
+async def get_account(account_id: int):
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(Account).where(Account.id == account_id))
+        account = result.scalar_one_or_none()
+        if not account:
+            raise HTTPException(404, "Account not found")
+
+        closed_r = await session.execute(
+            select(Trade)
+            .where(Trade.account_id == account_id, Trade.status == "CLOSED")
+            .order_by(desc(Trade.closed_at))
+            .limit(100)
+        )
+        closed_trades = closed_r.scalars().all()
+
+        open_r = await session.execute(
+            select(Trade).where(
+                Trade.account_id == account_id,
+                Trade.status == "OPEN",
+            )
+        )
+        open_trades = open_r.scalars().all()
+
+        ai_r = await session.execute(
+            select(AIAnalysis)
+            .where(
+                AIAnalysis.account_id == account_id,
+                AIAnalysis.source == "trade_close",
+            )
+            .order_by(desc(AIAnalysis.created_at))
+            .limit(1)
+        )
+        latest_perf_ai = ai_r.scalar_one_or_none()
+
+    total_realized = sum(t.pnl or 0 for t in closed_trades)
+    base = float(account.starting_balance or account.balance or 1)
+    roi_pct = round((total_realized / base) * 100, 2) if base else 0.0
+    wins = sum(1 for t in closed_trades if (t.pnl or 0) > 0)
+
+    def _trade_row(t: Trade):
+        return {
+            "id": t.id,
+            "direction": t.direction,
+            "entry_price": t.entry_price,
+            "exit_price": t.exit_price,
+            "lots": t.lots,
+            "sl": t.sl,
+            "tp": t.tp,
+            "pnl": t.pnl,
+            "close_reason": t.close_reason,
+            "status": t.status,
+            "opened_at": t.opened_at.isoformat() if t.opened_at else None,
+            "closed_at": t.closed_at.isoformat() if t.closed_at else None,
+            "mt5_position_ticket": getattr(t, "mt5_position_ticket", None),
+        }
+
+    is_demo = account.is_demo
+    if is_demo is None and account.broker_type == "paper":
+        is_demo = True
+
+    return {
+        "id": account.id,
+        "name": account.name,
+        "broker_type": account.broker_type,
+        "login": account.login or "",
+        "server": account.server or "",
+        "is_demo": is_demo,
+        "symbol": account.symbol,
+        "timeframe": account.timeframe,
+        "profile": account.profile,
+        "risk_per_trade": account.risk_per_trade,
+        "max_open_trades": account.max_open_trades,
+        "balance": account.balance,
+        "equity": account.equity,
+        "starting_balance": getattr(account, "starting_balance", None) or account.balance,
+        "enabled": account.enabled,
+        "stats": {
+            "total_realized_pnl": round(total_realized, 2),
+            "closed_trade_count": len(closed_trades),
+            "open_trade_count": len(open_trades),
+            "win_count": wins,
+            "win_rate_pct": round(wins / len(closed_trades) * 100, 1) if closed_trades else 0.0,
+            "roi_vs_starting_balance_pct": roi_pct,
+        },
+        "closed_trades": [_trade_row(t) for t in closed_trades],
+        "open_trades": [_trade_row(t) for t in open_trades],
+        "latest_performance_ai": (
+            {
+                "id": latest_perf_ai.id,
+                "direction": latest_perf_ai.direction,
+                "confidence": latest_perf_ai.confidence,
+                "reasoning": latest_perf_ai.reasoning,
+                "metrics": latest_perf_ai.metrics,
+                "created_at": latest_perf_ai.created_at.isoformat()
+                if latest_perf_ai.created_at
+                else None,
+            }
+            if latest_perf_ai
+            else None
+        ),
+    }
 
 
 @app.post("/api/accounts")
@@ -204,6 +322,8 @@ async def create_account(data: AccountCreate):
             max_open_trades=data.max_open_trades,
             balance=data.balance,
             equity=data.balance,
+            starting_balance=data.balance,
+            is_demo=True if data.broker_type == "paper" else None,
         )
         session.add(account)
         await session.commit()
@@ -254,6 +374,7 @@ async def delete_account(account_id: int):
         # Clean up dependent rows (SQLite FK constraints are strict).
         # Commit the deletes before removing the account to avoid SQLAlchemy trying
         # to NULL out FK columns on flush.
+        await session.execute(delete(AIAnalysis).where(AIAnalysis.account_id == account_id))
         await session.execute(delete(Trade).where(Trade.account_id == account_id))
         await session.execute(delete(Signal).where(Signal.account_id == account_id))
         await session.execute(delete(Account).where(Account.id == account_id))
@@ -308,6 +429,7 @@ async def list_trades(status: str = None, account_id: int = None, limit: int = 5
             "status": t.status, "close_reason": t.close_reason,
             "opened_at": t.opened_at.isoformat() if t.opened_at else None,
             "closed_at": t.closed_at.isoformat() if t.closed_at else None,
+            "mt5_position_ticket": getattr(t, "mt5_position_ticket", None),
         }
         for t in trades
     ]
@@ -316,9 +438,24 @@ async def list_trades(status: str = None, account_id: int = None, limit: int = 5
 # ── Signals ──────────────────────────────────────────────────────────
 
 @app.get("/api/signals")
-async def list_signals(account_id: int = None, limit: int = 50):
+async def list_signals(
+    account_id: Optional[int] = None,
+    limit: int = 50,
+    min_score: Optional[int] = None,
+):
+    floor = int(settings.min_confluence_floor) if min_score is None else int(min_score)
     async with AsyncSessionLocal() as session:
-        query = select(Signal).order_by(desc(Signal.created_at)).limit(limit)
+        query = (
+            select(Signal)
+            .where(
+                or_(
+                    Signal.signal_type == "HOLD",
+                    Signal.score >= floor,
+                )
+            )
+            .order_by(desc(Signal.created_at))
+            .limit(limit)
+        )
         if account_id:
             query = query.where(Signal.account_id == account_id)
         result = await session.execute(query)
@@ -334,6 +471,134 @@ async def list_signals(account_id: int = None, limit: int = 50):
         }
         for s in signals
     ]
+
+
+class IntelFetchBody(BaseModel):
+    """One SociaVault twitter/search request per button click."""
+    query: Optional[str] = None
+
+
+@app.get("/api/intel/config")
+async def intel_config():
+    return {
+        "default_query": settings.intel_default_query,
+        "sociavault_configured": bool((settings.sociavault_api_key or "").strip()),
+    }
+
+
+@app.post("/api/intel/fetch-tweets")
+async def intel_fetch_tweets(body: IntelFetchBody):
+    """
+    Manual only: one SociaVault search (1 credit) + persist tweets + Claude analysis.
+    """
+    key = (settings.sociavault_api_key or "").strip()
+    if not key:
+        raise HTTPException(
+            503,
+            "SOCIAVAULT_API_KEY is not set — add it to .env on the API server.",
+        )
+    q = (body.query or "").strip() or (settings.intel_default_query or "").strip()
+    if not q:
+        raise HTTPException(400, "Provide a non-empty query or set INTEL_DEFAULT_QUERY in .env")
+
+    from intelligence.sociavault import fetch_twitter_search
+    from intelligence.tweet_persist import persist_tweet_dicts
+    from intelligence.claude_analyzer import ClaudeAnalyzer
+
+    base = (settings.sociavault_base_url or "https://api.sociavault.com").strip()
+    tweets = await fetch_twitter_search(key, q, base_url=base)
+    inserted = await persist_tweet_dicts(tweets) if tweets else 0
+
+    analyzer = ClaudeAnalyzer()
+    analysis: dict
+    if tweets and analyzer.enabled:
+        analysis = await analyzer.analyze_tweets(tweets, search_query=q)
+    elif tweets:
+        analysis = {
+            "direction": "neutral",
+            "confidence": 0,
+            "reasoning": "ANTHROPIC_API_KEY not set — tweets saved without AI summary.",
+        }
+    else:
+        analysis = {
+            "direction": "neutral",
+            "confidence": 0,
+            "reasoning": "No posts returned for this query (try different keywords).",
+        }
+
+    serialized = [
+        {
+            "tweet_id": str(t.get("id", "")),
+            "author": t.get("author", ""),
+            "text": t.get("text", ""),
+            "url": t.get("url"),
+            "source": t.get("source", "sociavault"),
+        }
+        for t in tweets
+    ]
+
+    return {
+        "query": q,
+        "sociavault_requests": 1,
+        "tweets_found": len(tweets),
+        "tweets_new_rows": inserted,
+        "tweets": serialized,
+        "analysis": analysis,
+    }
+
+
+# ── Live snapshot (open trades + spot) ───────────────────────────────
+
+@app.get("/api/live")
+async def live_snapshot():
+    """Open positions with approximate floating P/L using Yahoo spot (GC=F)."""
+    from intelligence.spot_price import estimate_open_pnl, fetch_xau_usd_spot
+
+    spot = await fetch_xau_usd_spot()
+    contract_size = 100.0
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Trade)
+            .where(Trade.status == "OPEN")
+            .order_by(desc(Trade.opened_at))
+            .limit(40)
+        )
+        rows = result.scalars().all()
+
+    open_trades = []
+    total_unrealized = 0.0
+    for t in rows:
+        u = None
+        if spot and t.entry_price and t.direction:
+            u = estimate_open_pnl(
+                t.direction,
+                float(t.entry_price),
+                float(t.lots or 0),
+                contract_size,
+                float(spot),
+            )
+            u = round(u, 2)
+            total_unrealized += u
+        open_trades.append({
+            "id": t.id,
+            "account_id": t.account_id,
+            "direction": t.direction,
+            "entry_price": t.entry_price,
+            "lots": t.lots,
+            "sl": t.sl,
+            "tp": t.tp,
+            "confluence_score": t.confluence_score,
+            "unrealized_pnl": u,
+            "opened_at": t.opened_at.isoformat() if t.opened_at else None,
+            "mt5_position_ticket": getattr(t, "mt5_position_ticket", None),
+        })
+
+    return {
+        "spot_xauusd": spot,
+        "open_trades": open_trades,
+        "total_unrealized_pnl": round(total_unrealized, 2),
+        "updated_at": datetime.utcnow().isoformat(),
+    }
 
 
 # ── News & AI ────────────────────────────────────────────────────────
@@ -358,17 +623,24 @@ async def list_news(limit: int = 20):
 
 
 @app.get("/api/ai-analyses")
-async def list_analyses(limit: int = 20):
+async def list_analyses(limit: int = 20, account_id: Optional[int] = None):
     async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(AIAnalysis).order_by(desc(AIAnalysis.created_at)).limit(limit)
-        )
+        query = select(AIAnalysis).order_by(desc(AIAnalysis.created_at)).limit(limit)
+        if account_id is not None:
+            query = query.where(AIAnalysis.account_id == account_id)
+        result = await session.execute(query)
         analyses = result.scalars().all()
 
     return [
         {
-            "id": a.id, "source": a.source, "direction": a.direction,
-            "confidence": a.confidence, "reasoning": a.reasoning,
+            "id": a.id,
+            "source": a.source,
+            "account_id": getattr(a, "account_id", None),
+            "trade_id": getattr(a, "trade_id", None),
+            "direction": a.direction,
+            "confidence": a.confidence,
+            "reasoning": a.reasoning,
+            "metrics": getattr(a, "metrics", None),
             "created_at": a.created_at.isoformat() if a.created_at else None,
         }
         for a in analyses

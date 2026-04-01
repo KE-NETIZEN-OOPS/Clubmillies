@@ -1,9 +1,8 @@
 """
-ClubMillies — Message templates and encouraging messages.
+ClubMillies — Message templates, wealth motivation, and SL humor.
 """
 import random
 
-# ── Trade Alerts ─────────────────────────────────────────────────────
 
 def trade_opened_msg(data: dict) -> str:
     direction = data["direction"]
@@ -17,48 +16,57 @@ def trade_opened_msg(data: dict) -> str:
         f"🛑 Stop Loss: <code>${data['sl']:.2f}</code>\n"
         f"🎯 Take Profit: <code>${data['tp']:.2f}</code>\n\n"
         f"⚡ Power: {bar} <b>{score}/15</b>\n\n"
-        f"<i>ClubMillies — Not the best you can get but the best there is</i>"
+        f"👑 <b>ClubMillies Master Signals</b> — execution locked in.\n"
+        f"<i>{random.choice(WEALTH_MOTIVATION)}</i>"
     )
 
 
 def trade_closed_msg(data: dict) -> str:
-    pnl = data["pnl"]
-    reason = data["reason"]
-    direction = data["direction"]
+    pnl = data.get("pnl") or 0
+    reason = (data.get("reason") or "").upper()
+    direction = data.get("direction", "")
 
-    if reason == "TAKE PROFIT":
-        emoji = "🎯💰"
-        header = "TAKE PROFIT HIT!"
-    elif reason == "STOP LOSS":
-        emoji = "🛑"
-        header = "STOP LOSS HIT"
+    is_tp = reason in ("TP", "TAKE PROFIT", "TAKE_PROFIT")
+    is_sl = reason in ("SL", "STOP LOSS", "STOP_LOSS")
+
+    if is_tp:
+        header = "🎯🏆 <b>TAKE PROFIT — ClubMillies Master Signals</b>"
+        extra = random.choice(TP_CELEBRATION)
+        emoji_line = "✨💰🥂 " + random.choice(WEALTH_MOTIVATION)
+    elif is_sl:
+        header = "🛑 <b>STOP LOSS FILLED</b> — plan respected"
+        extra = random.choice(SL_FUNNY)
+        emoji_line = random.choice(SL_MEME_LINES)
     else:
-        emoji = "🔄"
-        header = f"TRADE CLOSED ({reason})"
+        header = f"🔄 <b>TRADE CLOSED</b> ({reason})"
+        extra = random.choice(LOSS_MESSAGES) if pnl <= 0 else random.choice(WIN_MESSAGES)
+        emoji_line = ""
 
     pnl_emoji = "✅" if pnl > 0 else "❌"
     pnl_str = f"+${pnl:.2f}" if pnl > 0 else f"-${abs(pnl):.2f}"
 
     msg = (
-        f"{emoji} <b>{header}</b>\n\n"
+        f"{header}\n\n"
         f"📊 {direction} closed\n"
-        f"📍 Entry: <code>${data['entry']:.2f}</code>\n"
-        f"📍 Exit: <code>${data['exit']:.2f}</code>\n"
-        f"{pnl_emoji} P&L: <code>{pnl_str}</code>\n"
+        f"📍 Entry: <code>${data.get('entry', 0):.2f}</code>\n"
+        f"📍 Exit: <code>${data.get('exit', 0):.2f}</code>\n"
+        f"{pnl_emoji} P&L: <code>{pnl_str}</code>\n\n"
+        f"{extra}\n"
     )
-
-    # Add encouraging message
-    if pnl > 0:
+    if emoji_line:
+        msg += f"\n<i>{emoji_line}</i>\n"
+    if is_tp and pnl > 0:
+        msg += f"\n{random.choice(WEALTH_MOTIVATION)}"
+    elif not is_tp and not is_sl and pnl > 0:
         msg += f"\n💪 {random.choice(WIN_MESSAGES)}"
-    else:
+    elif not is_tp and not is_sl and pnl <= 0:
         msg += f"\n🧠 {random.choice(LOSS_MESSAGES)}"
-
     return msg
 
 
 def _power_bar(score: int, max_score: int = 15) -> str:
     """Generate a visual power bar for confluence score."""
-    filled = round(score / max_score * 10)
+    filled = max(0, min(10, round(score / max_score * 10)))
     empty = 10 - filled
     if score >= 7:
         bar = "🟩" * filled + "⬜" * empty
@@ -87,7 +95,7 @@ def signal_msg(data: dict) -> str:
         msg += f"🎯 Take Profit: <code>${tp:.2f}</code>\n"
     msg += (
         f"\n⚡ Power: {bar} <b>{score}/15</b>\n\n"
-        f"<i>ClubMillies — Not the best you can get but the best there is</i>"
+        f"<i>ClubMillies Master Signals — {random.choice(WEALTH_MOTIVATION)}</i>"
     )
     return msg
 
@@ -108,13 +116,20 @@ def ai_analysis_msg(data: dict) -> str:
     direction = data.get("direction", "neutral")
     confidence = data.get("confidence", 0)
     emoji = "🟢" if direction == "bullish" else "🔴" if direction == "bearish" else "⚪"
-    bar = "█" * (confidence // 10) + "░" * (10 - confidence // 10)
+    bar = "█" * max(0, min(10, confidence // 10)) + "░" * max(0, 10 - confidence // 10)
+    src = data.get("source", "claude")
+    label = {
+        "news": "News AI",
+        "twitter": "Twitter AI",
+        "market": "Market AI",
+        "trade_close": "Performance AI",
+    }.get(src, src or "Claude")
     return (
-        f"🤖 <b>AI ANALYSIS</b>\n\n"
+        f"🤖 <b>AI — {label}</b>\n\n"
         f"{emoji} Direction: <b>{direction.upper()}</b>\n"
         f"📊 Confidence: [{bar}] {confidence}%\n"
         f"💡 {data.get('reasoning', 'N/A')}\n\n"
-        f"<i>Source: {data.get('source', 'Claude AI')}</i>"
+        f"<i>ClubMillies intelligence layer</i>"
     )
 
 
@@ -131,7 +146,35 @@ def daily_report_msg(stats: dict) -> str:
     )
 
 
-# ── Encouraging Messages ────────────────────────────────────────────
+# ── Motivation & humor pools (shuffled via random.choice) ────────────
+
+TP_CELEBRATION = [
+    "👑 ClubMillies Master Signals — the target was always the plan. Discipline pays.",
+    "🥂 Target vaporized. Wealth favors the systematic.",
+    "🏆 Confluence delivered. This is what edge looks like.",
+    "✨ TP secured — your process beat the noise.",
+    "💎 Precision beats prediction. Another clean harvest.",
+    "🚀 Risk defined, reward collected. Trading is a business — you just closed a solid invoice.",
+]
+
+SL_FUNNY = [
+    "The market said ‘not today’ — your stop said ‘I’ve got you’. 🧱",
+    "Stop loss: the bouncer that keeps your account from doing karaoke after midnight. 🎤🚫",
+    "That wasn’t a loss — it was tuition with a receipt. 🧾😅",
+    "Even legends eat stop hunts for breakfast sometimes. 🥞📉",
+    "Risk management flex: small L, account still standing. 💪🛑",
+    "Plot twist: the SL was the hero all along. 🦸‍♂️📉",
+    "Market: ‘surprise!’ You: ‘capped.’ That’s professionalism. 🎩",
+    "Stop hit — ego didn’t. That’s the real win. 🏅",
+    "Like a seatbelt: annoying until it saves you. 🚗🛑",
+    "The trade ghosted you — your stop didn’t ghost your account. 👻✅",
+]
+
+SL_MEME_LINES = [
+    "📉 Speed bump, not a cliff.",
+    "🎰 House edge is time + discipline — you kept both.",
+    "🧠 Stop = ‘wrong fast’ — cheaper than ‘wrong forever’.",
+]
 
 WIN_MESSAGES = [
     "Money moves! The strategy is printing! 💸",
@@ -159,6 +202,117 @@ LOSS_MESSAGES = [
     "Shake it off. The next high-confluence setup is around the corner 🎯",
     "Losses are tuition. And we're almost done paying 🎓",
     "This is why we risk only 2%. Small loss, strategy intact ✅",
+]
+
+WEALTH_MOTIVATION = [
+    "Wealth is built in boring repetition — not one lucky spike.",
+    "Discipline is the bridge between goals and gold.",
+    "Patience turns setups into stacks.",
+    "Risk small, think big, compound quietly.",
+    "The chart doesn’t care about your feelings — your system does.",
+    "Freedom is funded by process, not hope.",
+    "Every tick is a vote — vote with your plan.",
+    "Liquidity rewards the prepared mind.",
+    "Capital preservation is the first profit.",
+    "Consistency beats intensity in trading and in life.",
+    "Your edge is your routine on display.",
+    "Master the pause between signal and click.",
+    "Fortunes favor the patient and the precise.",
+    "Trade the plan — let the market do the drama.",
+    "Small edges, large time horizon — that’s wealth.",
+    "Calm execution beats loud prediction.",
+    "Protect downside — upside handles itself.",
+    "Journal the trade, not just the P/L.",
+    "Systems scale — emotions don’t.",
+    "The best trade is often the one you skip.",
+    "Risk is a dial — never a hammer.",
+    "Clarity beats confidence.",
+    "Stack evidence, not opinions.",
+    "Your future self funds today’s discipline.",
+    "Markets echo: preparation pays compound interest.",
+    "Stay liquid in mind and in account.",
+    "Precision is a habit, not a mood.",
+    "Win quietly. Improve loudly.",
+    "Measure twice — click once.",
+    "Volatility is the price of opportunity.",
+    "Sleep comes easier with defined risk.",
+    "Wealth whispers — hype screams.",
+    "Trade like an owner, not a gambler.",
+    "The trend rewards those who survive the chop.",
+    "Macro patience, micro execution.",
+    "Your rules are your real leverage.",
+    "Capital compounds when ego doesn’t.",
+    "Good traders love being bored.",
+    "Every stop is a boundary — boundaries build empires.",
+    "Focus on the next right action.",
+    "The scoreboard is long-term.",
+    "Liquidity, volatility, discipline — pick two to respect.",
+    "Plan the trade — trade the plan.",
+    "Confidence follows evidence.",
+    "Let winners breathe — cut doubts fast.",
+    "The market is a teacher — pay attention.",
+    "Wealth is what you keep after the storm.",
+    "Risk defines your runway.",
+    "Slow is smooth — smooth is profitable.",
+    "Build habits that pay rent.",
+    "Data over drama.",
+    "Your edge is boring on purpose.",
+    "Trade small enough to think clearly.",
+    "Protect the stack — opportunities recycle.",
+    "Consistency is the real alpha.",
+    "Mind the spread — and the ego spread too.",
+    "Every session is practice for the big one.",
+    "Stay humble — the market humbles for free.",
+    "Fortune favors funded discipline.",
+    "Think in distributions, not single trades.",
+    "Keep powder dry for high conviction.",
+    "Process first — outcomes follow.",
+    "Quiet accounts grow loud results.",
+    "Measure risk in sleep hours saved.",
+    "Trade to live — don’t live to trade recklessly.",
+    "The best risk manager is a rested mind.",
+    "Wealth: delayed gratification with a spreadsheet.",
+    "Your playbook beats your mood.",
+    "Signals are invitations — risk management is RSVP.",
+    "Stack skills — gold follows.",
+    "Precision is respect for capital.",
+    "The market rewards adults.",
+    "Build the machine — then let it run.",
+    "Survive first — thrive second.",
+    "Risk is rented — never marry it.",
+    "Keep losses boring — let wins surprise you.",
+    "Macro calm, micro sharp.",
+    "Your journal is your edge file.",
+    "Wealth whispers when discipline speaks.",
+    "Trade clean — live free.",
+    "Capital is confidence with a limit order.",
+    "The line between pro and amateur is process.",
+    "Let math lead — let noise fade.",
+    "Opportunity is infinite — capital is not.",
+    "Protect the downside — celebrate the upside.",
+    "Stillness before entries — speed after risk is defined.",
+    "Wealth is a series of good nos.",
+    "Trade the odds — sleep the calm.",
+    "Discipline is the interest rate on skill.",
+    "Small steps, large arcs.",
+    "Your system is your shield.",
+    "Markets test patience — pass quietly.",
+    "Risk smart — stack long.",
+    "The chart is a mirror — your rules are the light.",
+    "Wealth compounds where fear is managed.",
+    "Stay mechanical on entries — human on review.",
+    "Profit is the applause — process is the rehearsal.",
+    "Keep score weekly — not tick-by-tick emotionally.",
+    "Liquidity is opportunity wearing a mask.",
+    "Trade like you’ll trade forever.",
+    "The best revenge on chaos is a checklist.",
+    "Wealth: boring days, exciting years.",
+    "Risk small — dream big — repeat.",
+    "Your future portfolio thanks today’s pause.",
+    "Precision beats prediction — always.",
+    "Markets reward the consistent, not the clever.",
+    "Stay green in mind when red on a trade.",
+    "Wealth is built in the hours nobody claps for.",
 ]
 
 DAILY_MESSAGES = [

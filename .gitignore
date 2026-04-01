@@ -1,5 +1,5 @@
 .env
-dashboard/.env*
+dashboard/.env.local
 *.db
 *.log
 __pycache__/

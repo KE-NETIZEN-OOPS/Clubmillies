@@ -4,16 +4,16 @@ Each account runs its own independent trading loop.
 """
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import select, update
+from sqlalchemy import select, update, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database import AsyncSessionLocal
-from core.models import Account, Trade, Signal
+from core.models import Account, Trade, Signal, AIAnalysis
 from core.events import bus, TRADE_OPENED, TRADE_CLOSED, SIGNAL_GENERATED, ACCOUNT_UPDATE
 from core.engine.confluence import ConfluenceEngine, prepare_dataframe
 from core.config import settings
@@ -151,6 +151,9 @@ class MT5LiveBroker:
     def place_order(self, direction, lots, sl, tp):
         if not self.mt5:
             return None
+        before = {
+            p.ticket for p in (self.mt5.positions_get(symbol=self.symbol) or [])
+        }
         tick = self.mt5.symbol_info_tick(self.symbol)
         if not tick:
             return None
@@ -199,7 +202,21 @@ class MT5LiveBroker:
             result = self.mt5.order_send(req)
             last_result = result
             if result and result.retcode == self.mt5.TRADE_RETCODE_DONE:
-                return {"ticket": result.order, "price": price}
+                after_list = self.mt5.positions_get(symbol=self.symbol) or []
+                after = {p.ticket for p in after_list}
+                new_tickets = after - before
+                pos_ticket = new_tickets.pop() if len(new_tickets) == 1 else None
+                if pos_ticket is None and after_list:
+                    for p in sorted(after_list, key=lambda x: getattr(x, "time_update", 0), reverse=True):
+                        if getattr(p, "magic", 0) != 123456:
+                            continue
+                        if abs(float(p.volume) - float(lots)) > 0.01:
+                            continue
+                        want_buy = direction == "BUY"
+                        if (want_buy and p.type == 0) or (not want_buy and p.type == 1):
+                            pos_ticket = p.ticket
+                            break
+                return {"ticket": pos_ticket, "price": price}
 
         if last_result and getattr(last_result, "comment", ""):
             logger.error(f"MT5 order_send failed: {last_result.comment}")
@@ -246,6 +263,58 @@ class MT5LiveBroker:
             if res and res.retcode == self.mt5.TRADE_RETCODE_DONE:
                 return
 
+    def match_db_trade_to_position(
+        self, direction: str, entry_price: float, lots: float, tol: float = 2.0
+    ) -> Optional[int]:
+        if not self.mt5:
+            return None
+        pos_list = self.mt5.positions_get(symbol=self.symbol) or []
+        for p in pos_list:
+            if getattr(p, "magic", 0) != 123456:
+                continue
+            d = "BUY" if p.type == 0 else "SELL"
+            if d != direction:
+                continue
+            if abs(float(p.volume) - float(lots)) > 0.02:
+                continue
+            if abs(float(p.price_open) - float(entry_price)) <= tol:
+                return int(p.ticket)
+        return None
+
+    def fetch_closed_position_details(
+        self, position_ticket: int, opened_at: datetime
+    ) -> Optional[dict]:
+        """Profit, exit price, and TP/SL reason from MT5 deal history."""
+        if not self.mt5:
+            return None
+        start = opened_at
+        if start.tzinfo is not None:
+            start = start.replace(tzinfo=None)
+        day_floor = start - timedelta(days=1)
+        t1 = datetime.utcnow()
+        try:
+            self.mt5.history_deals_select(day_floor, t1)
+        except Exception:
+            pass
+        deals = self.mt5.history_deals_get(day_floor, t1, position=position_ticket)
+        if deals is None or len(deals) == 0:
+            return None
+        total = 0.0
+        exit_deal = deals[-1]
+        exit_price = float(exit_deal.price)
+        exit_reason = int(exit_deal.reason)
+        for d in deals:
+            total += float(d.profit) + float(d.swap) + float(d.commission)
+        tp_code = int(getattr(self.mt5, "DEAL_REASON_TP", 5))
+        sl_code = int(getattr(self.mt5, "DEAL_REASON_SL", 4))
+        if exit_reason == sl_code:
+            reason_str = "SL"
+        elif exit_reason == tp_code:
+            reason_str = "TP"
+        else:
+            reason_str = "CLIENT"
+        return {"exit_price": exit_price, "pnl": round(total, 2), "close_reason": reason_str}
+
 
 class AccountRunner:
     """Runs the trading strategy for a single account."""
@@ -286,9 +355,13 @@ class AccountRunner:
         else:
             self.broker = PaperBroker(balance=account.balance)
 
-        # Setup confluence engine
+        # Setup confluence engine (never below global floor)
         profile = settings.sniper if account.profile == "SNIPER" else settings.aggressive
-        self.engine = ConfluenceEngine(min_confluence=profile["min_confluence"])
+        eff_min = max(
+            int(profile["min_confluence"]),
+            int(settings.min_confluence_floor),
+        )
+        self.engine = ConfluenceEngine(min_confluence=eff_min)
         self.sl_mult = profile["atr_sl"]
         self.tp_mult = profile["atr_tp"]
         self.risk_pct = account.risk_per_trade
@@ -338,11 +411,23 @@ class AccountRunner:
         info = await asyncio.to_thread(mt5.account_info)
         logger.info(f"MT5 connected: {info.server} | Account: {info.login} | Balance: ${info.balance:.2f}")
 
-        # Update balance in DB
+        trade_mode = int(getattr(info, "trade_mode", 2))
+        is_demo = trade_mode in (0, 1)
+
         async with AsyncSessionLocal() as session:
+            result = await session.execute(select(Account).where(Account.id == account.id))
+            acc_row = result.scalar_one_or_none()
+            extras = {}
+            if acc_row and (
+                acc_row.starting_balance is None or float(acc_row.starting_balance) <= 0
+            ):
+                extras["starting_balance"] = float(info.balance)
             await session.execute(
                 update(Account).where(Account.id == account.id).values(
-                    balance=info.balance, equity=info.equity
+                    balance=info.balance,
+                    equity=info.equity,
+                    is_demo=is_demo,
+                    **extras,
                 )
             )
             await session.commit()
@@ -366,8 +451,106 @@ class AccountRunner:
         if self._task:
             self._task.cancel()
 
+    async def _sync_mt5_closed_trades(self, account: Account):
+        """Detect MT5 positions closed by TP/SL (or externally) and persist to DB."""
+        if self.broker_type != "mt5" or not self.broker or not getattr(self.broker, "mt5", None):
+            return
+        current = {p["ticket"] for p in self.broker.positions}
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(Trade).where(
+                    Trade.account_id == self.account_id,
+                    Trade.status == "OPEN",
+                )
+            )
+            open_rows = list(result.scalars().all())
+
+        for t in open_rows:
+            tid = t.mt5_position_ticket
+            if tid and tid not in current:
+                detail = await asyncio.to_thread(
+                    self.broker.fetch_closed_position_details, tid, t.opened_at
+                )
+                if not detail:
+                    logger.warning(
+                        f"MT5 position {tid} gone but no history — closing trade {t.id} as CLIENT"
+                    )
+                    detail = {
+                        "exit_price": t.tp or t.sl or t.entry_price,
+                        "pnl": 0.0,
+                        "close_reason": "CLIENT",
+                    }
+                await self._save_closed_trade(
+                    {
+                        "trade_id": t.id,
+                        "mt5_ticket": tid,
+                        "direction": t.direction,
+                        "entry": t.entry_price,
+                        "lots": t.lots,
+                        "exit": detail["exit_price"],
+                        "pnl": detail["pnl"],
+                        "reason": detail["close_reason"],
+                    }
+                )
+                continue
+            if not tid:
+                match = await asyncio.to_thread(
+                    self.broker.match_db_trade_to_position,
+                    t.direction,
+                    float(t.entry_price or 0),
+                    float(t.lots or 0),
+                )
+                if match:
+                    async with AsyncSessionLocal() as session:
+                        await session.execute(
+                            update(Trade)
+                            .where(Trade.id == t.id)
+                            .values(mt5_position_ticket=match)
+                        )
+                        await session.commit()
+
+    async def _on_trade_closed_ai(self, trade_id: int):
+        try:
+            from intelligence.claude_analyzer import get_analyzer
+
+            await get_analyzer().analyze_after_trade_close(self.account_id, trade_id)
+        except Exception as e:
+            logger.warning(f"Post-close AI analysis failed: {e}")
+
+    async def _macro_sentiment_blocks(self, signal: int, score: int) -> bool:
+        """
+        If recent AI (twitter/market) strongly disagrees with direction and
+        confluence is not very high, skip the trade for this bar.
+        """
+        if signal == 0 or score >= 9:
+            return False
+        try:
+            async with AsyncSessionLocal() as session:
+                r = await session.execute(
+                    select(AIAnalysis)
+                    .where(AIAnalysis.source.in_(["twitter", "market", "news"]))
+                    .order_by(desc(AIAnalysis.created_at))
+                    .limit(1)
+                )
+                a = r.scalar_one_or_none()
+            if not a or not a.created_at:
+                return False
+            age = (datetime.utcnow() - a.created_at).total_seconds()
+            if age > 4 * 3600:
+                return False
+            d = (a.direction or "").lower()
+            if signal == 1 and d == "bearish" and score < 8:
+                return True
+            if signal == -1 and d == "bullish" and score < 8:
+                return True
+        except Exception as e:
+            logger.debug(f"Sentiment check skipped: {e}")
+        return False
+
     async def _tick(self, account: Account):
         self.broker.tick()
+        if self.broker_type == "mt5":
+            await self._sync_mt5_closed_trades(account)
         df = self.broker.get_candles()
         if df is None or getattr(df, "empty", True) or "close" not in df.columns:
             logger.warning(
@@ -388,7 +571,11 @@ class AccountRunner:
         result = self.engine.get_signal(df)
         signal = result["signal"]
         score = result["score"]
-        reasons = result["reasons"]
+        reasons = list(result["reasons"])
+
+        if await self._macro_sentiment_blocks(signal, score):
+            signal = 0
+            reasons.append("MACRO_SENTIMENT")
 
         contract_size = 100
         if self.broker_type != "mt5":
@@ -401,23 +588,23 @@ class AccountRunner:
                     if price <= pos["sl"]:
                         pnl = (pos["sl"] - pos["entry"]) * pos["lots"] * contract_size
                         self.broker.balance += pnl
-                        closed_trades.append({**pos, "exit": pos["sl"], "pnl": round(pnl, 2), "reason": "STOP LOSS"})
+                        closed_trades.append({**pos, "exit": pos["sl"], "pnl": round(pnl, 2), "reason": "SL"})
                         hit = True
                     elif price >= pos["tp"]:
                         pnl = (pos["tp"] - pos["entry"]) * pos["lots"] * contract_size
                         self.broker.balance += pnl
-                        closed_trades.append({**pos, "exit": pos["tp"], "pnl": round(pnl, 2), "reason": "TAKE PROFIT"})
+                        closed_trades.append({**pos, "exit": pos["tp"], "pnl": round(pnl, 2), "reason": "TP"})
                         hit = True
                 else:
                     if price >= pos["sl"]:
                         pnl = (pos["entry"] - pos["sl"]) * pos["lots"] * contract_size
                         self.broker.balance += pnl
-                        closed_trades.append({**pos, "exit": pos["sl"], "pnl": round(pnl, 2), "reason": "STOP LOSS"})
+                        closed_trades.append({**pos, "exit": pos["sl"], "pnl": round(pnl, 2), "reason": "SL"})
                         hit = True
                     elif price <= pos["tp"]:
                         pnl = (pos["entry"] - pos["tp"]) * pos["lots"] * contract_size
                         self.broker.balance += pnl
-                        closed_trades.append({**pos, "exit": pos["tp"], "pnl": round(pnl, 2), "reason": "TAKE PROFIT"})
+                        closed_trades.append({**pos, "exit": pos["tp"], "pnl": round(pnl, 2), "reason": "TP"})
                         hit = True
                 if not hit:
                     remaining.append(pos)
@@ -425,11 +612,6 @@ class AccountRunner:
 
             for ct in closed_trades:
                 await self._save_closed_trade(ct)
-                await bus.emit(TRADE_CLOSED, {
-                    "account_id": self.account_id, "direction": ct["direction"],
-                    "entry": ct["entry"], "exit": ct["exit"], "pnl": ct["pnl"],
-                    "reason": ct["reason"], "lots": ct["lots"],
-                })
 
         # Calculate SL/TP for the signal (even if we don't trade)
         sig_sl, sig_tp = None, None
@@ -455,18 +637,13 @@ class AccountRunner:
                         if ticket:
                             await asyncio.to_thread(self.broker.close_position, ticket)
                             await self._save_closed_trade({
+                                "mt5_ticket": ticket,
                                 "direction": pos["direction"],
                                 "entry": pos["entry"],
                                 "lots": pos["lots"],
                                 "exit": price,
                                 "pnl": round(float(pos.get("profit", 0.0) or 0.0), 2),
                                 "reason": "REVERSAL",
-                            })
-                            await bus.emit(TRADE_CLOSED, {
-                                "account_id": self.account_id, "direction": pos["direction"],
-                                "entry": pos["entry"], "exit": price,
-                                "pnl": round(float(pos.get("profit", 0.0) or 0.0), 2),
-                                "reason": "REVERSAL", "lots": pos["lots"],
                             })
                 # Refresh positions after closes
                 self.broker.tick()
@@ -478,11 +655,6 @@ class AccountRunner:
                         pnl = (price - pos["entry"]) * pnl_dir * pos["lots"] * contract_size
                         self.broker.balance += pnl
                         await self._save_closed_trade({**pos, "exit": price, "pnl": round(pnl, 2), "reason": "REVERSAL"})
-                        await bus.emit(TRADE_CLOSED, {
-                            "account_id": self.account_id, "direction": pos["direction"],
-                            "entry": pos["entry"], "exit": price, "pnl": round(pnl, 2),
-                            "reason": "REVERSAL", "lots": pos["lots"],
-                        })
                     else:
                         still_open.append(pos)
                 self.broker.positions = still_open
@@ -500,26 +672,28 @@ class AccountRunner:
                 else:
                     sl, tp = round(price + sl_dist, 2), round(price - tp_dist, 2)
 
-                # For MT5: place real order via broker
-                if self.broker_type == "mt5" and hasattr(self.broker, 'place_order'):
+                mt5_ticket = None
+                if self.broker_type == "mt5" and hasattr(self.broker, "place_order"):
                     order_result = await asyncio.to_thread(
                         self.broker.place_order, direction, lots, sl, tp
                     )
                     if order_result:
                         price = order_result.get("price", price)
+                        mt5_ticket = order_result.get("ticket")
                         logger.info(f"MT5 order placed: {direction} {lots} lots @ ${price:.2f}")
                     else:
                         logger.error("MT5 order failed — skipping")
                         return
                 else:
-                    # Paper broker: just append to positions list
                     pos = {"direction": direction, "entry": price, "lots": lots,
                            "sl": sl, "tp": tp, "score": score, "reasons": reasons}
                     self.broker.positions.append(pos)
 
                 await self._save_open_trade(
                     {"direction": direction, "entry": price, "lots": lots, "sl": sl, "tp": tp},
-                    score, reasons
+                    score,
+                    reasons,
+                    mt5_ticket=mt5_ticket,
                 )
                 await bus.emit(TRADE_OPENED, {
                     "account_id": self.account_id, "direction": direction,
@@ -547,7 +721,7 @@ class AccountRunner:
                 )
             await session.commit()
 
-    async def _save_open_trade(self, pos, score, reasons):
+    async def _save_open_trade(self, pos, score, reasons, mt5_ticket: Optional[int] = None):
         async with AsyncSessionLocal() as session:
             trade = Trade(
                 account_id=self.account_id,
@@ -559,28 +733,75 @@ class AccountRunner:
                 confluence_score=score,
                 confluence_reasons=reasons,
                 status="OPEN",
+                mt5_position_ticket=mt5_ticket,
             )
             session.add(trade)
             await session.commit()
 
-    async def _save_closed_trade(self, ct):
+    async def _save_closed_trade(self, ct: dict):
+        closed_id = None
+        emit_direction = ct.get("direction")
+        emit_entry = ct.get("entry")
+        emit_lots = ct.get("lots")
         async with AsyncSessionLocal() as session:
-            # Find the open trade and close it
-            result = await session.execute(
-                select(Trade).where(
-                    Trade.account_id == self.account_id,
-                    Trade.status == "OPEN",
-                    Trade.direction == ct["direction"],
-                ).order_by(Trade.opened_at.desc()).limit(1)
-            )
-            trade = result.scalar_one_or_none()
+            trade = None
+            if ct.get("trade_id"):
+                result = await session.execute(
+                    select(Trade).where(
+                        Trade.id == ct["trade_id"],
+                        Trade.account_id == self.account_id,
+                        Trade.status == "OPEN",
+                    )
+                )
+                trade = result.scalar_one_or_none()
+            elif ct.get("mt5_ticket"):
+                result = await session.execute(
+                    select(Trade).where(
+                        Trade.account_id == self.account_id,
+                        Trade.status == "OPEN",
+                        Trade.mt5_position_ticket == ct["mt5_ticket"],
+                    )
+                )
+                trade = result.scalar_one_or_none()
+            if not trade:
+                result = await session.execute(
+                    select(Trade)
+                    .where(
+                        Trade.account_id == self.account_id,
+                        Trade.status == "OPEN",
+                        Trade.direction == ct["direction"],
+                    )
+                    .order_by(Trade.opened_at.desc())
+                    .limit(1)
+                )
+                trade = result.scalar_one_or_none()
             if trade:
                 trade.exit_price = ct["exit"]
                 trade.pnl = ct["pnl"]
                 trade.status = "CLOSED"
                 trade.close_reason = ct["reason"]
                 trade.closed_at = datetime.utcnow()
+                closed_id = trade.id
+                emit_direction = trade.direction
+                emit_entry = trade.entry_price
+                emit_lots = trade.lots
                 await session.commit()
+
+        if closed_id:
+            await bus.emit(
+                TRADE_CLOSED,
+                {
+                    "account_id": self.account_id,
+                    "direction": emit_direction,
+                    "entry": emit_entry,
+                    "exit": ct["exit"],
+                    "pnl": ct["pnl"],
+                    "reason": ct["reason"],
+                    "lots": emit_lots,
+                    "trade_id": closed_id,
+                },
+            )
+            asyncio.create_task(self._on_trade_closed_ai(closed_id))
 
     async def _save_signal(self, signal, score, max_score, reasons, price, rsi, atr, sl=None, tp=None):
         sig_type = "BUY" if signal == 1 else "SELL" if signal == -1 else "HOLD"
@@ -600,7 +821,12 @@ class AccountRunner:
             session.add(s)
             await session.commit()
 
-        if signal != 0:
+        floor = int(settings.min_confluence_floor)
+        if (
+            signal != 0
+            and score >= floor
+            and sig_type in ("BUY", "SELL")
+        ):
             await bus.emit(SIGNAL_GENERATED, {
                 "account_id": self.account_id, "signal": sig_type,
                 "score": score, "reasons": reasons, "price": price,

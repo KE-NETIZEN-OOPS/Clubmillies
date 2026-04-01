@@ -18,26 +18,84 @@ from core.events import bus, NEWS_EVENT
 logger = logging.getLogger("clubmillies.news")
 
 FOREX_FACTORY_URL = "https://www.forexfactory.com/calendar"
-GOLD_CURRENCIES = ["USD", "EUR", "CNY"]  # Currencies that impact gold
+# Macro currencies that typically move gold / USD pairs
+CALENDAR_CURRENCIES = frozenset(
+    ["USD", "EUR", "GBP", "JPY", "CHF", "AUD", "NZD", "CAD", "CNY"]
+)
+FAIR_ECONOMY_JSON = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+
+
+async def fetch_faireconomy_calendar() -> list[dict]:
+    """Primary calendar: public JSON (avoids ForexFactory 403)."""
+    events: list[dict] = []
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ClubMillies/1.0"}
+    try:
+        async with httpx.AsyncClient(timeout=35, follow_redirects=True) as client:
+            resp = await client.get(FAIR_ECONOMY_JSON, headers=headers)
+        if resp.status_code != 200:
+            logger.warning(f"Fair Economy calendar HTTP {resp.status_code}")
+            return events
+        rows = resp.json()
+        if not isinstance(rows, list):
+            return events
+        for row in rows:
+            try:
+                country = (row.get("country") or "").strip()
+                if country not in CALENDAR_CURRENCIES:
+                    continue
+                title = (row.get("title") or "Event").strip()
+                impact_raw = (row.get("impact") or "Low").strip().lower()
+                if "high" in impact_raw or impact_raw == "red":
+                    impact = "high"
+                elif "medium" in impact_raw or impact_raw == "ora":
+                    impact = "medium"
+                else:
+                    impact = "low"
+                date_s = row.get("date") or ""
+                event_time = datetime.utcnow()
+                if date_s:
+                    try:
+                        event_time = datetime.fromisoformat(date_s.replace("Z", "+00:00"))
+                    except ValueError:
+                        pass
+                events.append({
+                    "title": title,
+                    "currency": country,
+                    "impact": impact,
+                    "forecast": (row.get("forecast") or "").strip(),
+                    "previous": (row.get("previous") or "").strip(),
+                    "actual": (row.get("actual") or "").strip(),
+                    "event_time": event_time,
+                })
+            except Exception:
+                continue
+    except Exception as e:
+        logger.error(f"Fair Economy calendar error: {e}")
+    return events
 
 
 async def fetch_forexfactory_calendar() -> list[dict]:
-    """Scrape Forexfactory calendar for today's events."""
+    """Economic calendar: Fair Economy JSON first, then ForexFactory via Jina proxy."""
+    fe = await fetch_faireconomy_calendar()
+    if fe:
+        logger.info(f"Calendar: {len(fe)} events from Fair Economy JSON")
+        return fe
+
     events = []
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-            resp = await client.get(FOREX_FACTORY_URL, headers=headers)
+            # Avoid direct FF 403 — Jina reader first
+            jina_url = f"https://r.jina.ai/http://{FOREX_FACTORY_URL}"
+            resp = await client.get(jina_url, headers=headers)
             if resp.status_code != 200:
-                # Forexfactory often blocks server-like traffic. Try a read-proxy fallback.
-                logger.warning(f"Forexfactory returned {resp.status_code} — trying fallback fetch")
-                fallback_url = f"https://r.jina.ai/http://{FOREX_FACTORY_URL}"
-                resp = await client.get(fallback_url, headers=headers)
-                if resp.status_code != 200:
-                    logger.warning(f"Forexfactory fallback returned {resp.status_code}")
-                    return events
+                logger.warning(f"Jina proxy calendar {resp.status_code} — direct FF")
+                resp = await client.get(FOREX_FACTORY_URL, headers=headers)
+            if resp.status_code != 200:
+                logger.warning(f"Forexfactory returned {resp.status_code}")
+                return events
 
         # The fallback fetch returns a markdown rendering, not HTML.
         if "Markdown Content:" in resp.text:
@@ -53,7 +111,7 @@ async def fetch_forexfactory_calendar() -> list[dict]:
                 if not currency_el:
                     continue
                 currency = currency_el.get_text(strip=True)
-                if currency not in GOLD_CURRENCIES:
+                if currency not in CALENDAR_CURRENCIES:
                     continue
 
                 impact_el = row.select_one("td.calendar__impact span")
@@ -150,7 +208,7 @@ def _parse_forexfactory_markdown(text: str) -> list[dict]:
         if current_date is None:
             current_date = now_date
 
-        if not currency or currency not in GOLD_CURRENCIES:
+        if not currency or currency not in CALENDAR_CURRENCIES:
             continue
 
         impact = "low"

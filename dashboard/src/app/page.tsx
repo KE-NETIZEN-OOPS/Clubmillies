@@ -6,11 +6,12 @@ import GlowCard from '@/components/ui/GlowCard';
 import AnimatedCounter from '@/components/ui/AnimatedCounter';
 import NeonBadge from '@/components/ui/NeonBadge';
 import FloatingButton from '@/components/ui/FloatingButton';
-import { api, DashboardData } from '@/lib/api';
+import { api, DashboardData, LiveSnapshot } from '@/lib/api';
 import { useWebSocket } from '@/lib/websocket';
 
 export default function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null);
+  const [live, setLive] = useState<LiveSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const { events, connected } = useWebSocket();
 
@@ -18,6 +19,24 @@ export default function Dashboard() {
     loadData();
     const interval = setInterval(loadData, 10000);
     return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function pollLive() {
+      try {
+        const L = await api.live();
+        if (!cancelled) setLive(L);
+      } catch {
+        /* optional endpoint */
+      }
+    }
+    pollLive();
+    const t = setInterval(pollLive, 4000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
   }, []);
 
   async function loadData() {
@@ -146,6 +165,57 @@ export default function Dashboard() {
         {/* Live Feed */}
         <div>
           <h2 className="text-lg font-bold text-gray-300 mb-4">Live Feed</h2>
+          {live && (
+            <GlowCard className="mb-4 space-y-2">
+              <div className="flex justify-between text-xs text-gray-500">
+                <span>Spot XAU/USD (ref.)</span>
+                <span className="font-mono text-gold">
+                  {live.spot_xauusd != null ? `$${live.spot_xauusd.toFixed(2)}` : '—'}
+                </span>
+              </div>
+              <div className="flex justify-between text-xs">
+                <span className="text-gray-500">Open positions</span>
+                <span
+                  className={`font-mono ${
+                    (live.total_unrealized_pnl || 0) >= 0 ? 'text-profit' : 'text-loss'
+                  }`}
+                >
+                  Σ unrealized:{' '}
+                  {(live.total_unrealized_pnl || 0) >= 0 ? '+' : ''}
+                  ${(live.total_unrealized_pnl || 0).toFixed(2)}
+                </span>
+              </div>
+              <div className="max-h-[120px] overflow-y-auto space-y-1 border-t border-white/5 pt-2">
+                {live.open_trades.length === 0 ? (
+                  <p className="text-gray-600 text-[10px]">No open trades</p>
+                ) : (
+                  live.open_trades.map((ot) => (
+                    <div key={ot.id} className="text-[10px] flex justify-between gap-2">
+                      <span>
+                        #{ot.account_id} {ot.direction} @ {ot.entry_price?.toFixed(2)}
+                      </span>
+                      <span
+                        className={
+                          ot.unrealized_pnl == null
+                            ? 'text-gray-600'
+                            : ot.unrealized_pnl >= 0
+                              ? 'text-profit'
+                              : 'text-loss'
+                        }
+                      >
+                        {ot.unrealized_pnl == null
+                          ? '—'
+                          : `${ot.unrealized_pnl >= 0 ? '+' : ''}$${ot.unrealized_pnl.toFixed(2)}`}
+                      </span>
+                    </div>
+                  ))
+                )}
+              </div>
+              <p className="text-[9px] text-gray-600">
+                Updated {new Date(live.updated_at).toLocaleTimeString()} · est. via Yahoo GC=F
+              </p>
+            </GlowCard>
+          )}
           <GlowCard className="max-h-[400px] overflow-y-auto space-y-3">
             {events.length === 0 ? (
               <p className="text-gray-600 text-sm text-center py-8">Waiting for events...</p>
